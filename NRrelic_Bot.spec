@@ -44,6 +44,7 @@ hiddenimports = [
     'pyautogui',
     'pydirectinput',
     'keyboard',
+    'cryptography.hazmat.primitives.ciphers',
     'cv2',
     'numpy',
     'PySide6.QtCore',

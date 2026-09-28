@@ -18,6 +18,7 @@ from core.preset_manager import PresetManager
 from core.ocr_engine import OCREngine
 from core.relic_detector import RELIC_STATE_UNKNOWN, RelicDetector, RELIC_STATE_LIGHT, RELIC_STATE_DARK_F, RELIC_STATE_DARK_FE, RELIC_STATE_DARK_E, RELIC_STATE_DARK_O
 from core.automation import RepositoryFilter
+from core.game_environment import log_brightness_check
 from core.utils import log_debug, DEBUG_ENABLED
 
 # 遗物状态中文名称映射
@@ -129,6 +130,11 @@ class RepoCleaner:
                 if not self.is_running:
                     return
                 time.sleep(0.1)
+
+            if not self.repository_filter.validate_game_resolution(log):
+                self.stop_reason = "error"
+                return
+            log_brightness_check(log)
 
             # 2. 应用筛选
             if not self.is_running:

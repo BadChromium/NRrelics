@@ -157,6 +157,10 @@ class ShopAutomation:
                     return
                 time.sleep(0.1)
 
+            if not self.repo_filter.validate_game_resolution(log):
+                self.stop_reason = "error"
+                return
+
             # 1. 检测并进入商人界面
             if not self._enter_merchant_interface(log):
                 self.stop_reason = self.stop_reason or "error"
