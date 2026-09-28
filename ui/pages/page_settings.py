@@ -68,9 +68,8 @@ class SettingsPage(QWidget):
         shop_group = self._create_shop_settings()
         layout.addWidget(shop_group)
 
-        # 开发者设置（根据设置决定是否显示）
+        # 开发者设置默认显示
         self.developer_card = self._create_developer_settings()
-        self.developer_card.setVisible(self.settings.get("developer_mode", False))
         layout.addWidget(self.developer_card)
 
         layout.addStretch()
@@ -116,7 +115,7 @@ class SettingsPage(QWidget):
         steam_label.setFixedWidth(150)
         self.steam_path_input = LineEdit()
         self.steam_path_input.setText(self.settings.get("steam_path", ""))
-        self.steam_path_input.setPlaceholderText("留空自动检测（默认路径）")
+        self.steam_path_input.setPlaceholderText("留空自动检测 Steam 安装目录")
         self.steam_path_input.textChanged.connect(self._auto_save_settings)
         steam_layout.addWidget(steam_label)
         steam_layout.addWidget(self.steam_path_input)
@@ -127,7 +126,7 @@ class SettingsPage(QWidget):
         steam_layout.addWidget(self.steam_browse_btn)
         card_layout.addLayout(steam_layout)
 
-        steam_desc = QLabel("用于读取Steam用户信息，留空则自动检测默认安装路径")
+        steam_desc = QLabel("用于读取Steam用户信息；留空时从注册表和各磁盘自动检测")
         steam_desc.setFont(QFont("Segoe UI", 8))
         steam_desc.setStyleSheet("color: gray;")
         card_layout.addWidget(steam_desc)
@@ -176,18 +175,6 @@ class SettingsPage(QWidget):
         card_layout.addLayout(valid_layout)
         card_layout.addWidget(valid_desc)
 
-        perfect_layout = QHBoxLayout()
-        perfect_layout.addWidget(QLabel("发现完美遗物时停止"))
-        self.stop_on_perfect_switch = SwitchButton()
-        self.stop_on_perfect_switch.setChecked(self.settings.get("stop_on_perfect_relic", False))
-        self.stop_on_perfect_switch.checkedChanged.connect(self._auto_save_settings)
-        perfect_layout.addWidget(self.stop_on_perfect_switch)
-        perfect_layout.addStretch()
-        card_layout.addLayout(perfect_layout)
-        perfect_desc = QLabel("当检测到至少3条有效词条且满足专用预设要求的遗物时自动停止")
-        perfect_desc.setWordWrap(True)
-        card_layout.addWidget(perfect_desc)
-
         return card
 
     def _create_shop_settings(self) -> CardWidget:
@@ -228,14 +215,35 @@ class SettingsPage(QWidget):
         perfect_layout.addWidget(self.shop_stop_on_perfect_switch)
         perfect_layout.addStretch()
         card_layout.addLayout(perfect_layout)
-        perfect_desc = QLabel("当检测到至少3条有效词条且满足专用预设要求的遗物时自动停止")
+        perfect_desc = QLabel("专用预设匹配至少3条有效词条且识别结果无不确定项时，保留当前遗物并停止购买")
+        perfect_desc.setFont(QFont("Segoe UI", 8))
+        perfect_desc.setStyleSheet("color: gray;")
         perfect_desc.setWordWrap(True)
         card_layout.addWidget(perfect_desc)
+
+        # 根据合格遗物数量停止（SL模式）
+        sl_mode_layout = QHBoxLayout()
+        sl_mode_label = QLabel("根据合格遗物数量停止:")
+        sl_mode_label.setFixedWidth(180)
+        self.sl_mode_switch = SwitchButton()
+        self.sl_mode_switch.setChecked(self.settings.get("sl_mode_enabled", False))
+        self.sl_mode_switch.checkedChanged.connect(self._auto_save_settings)
+        sl_mode_layout.addWidget(sl_mode_label)
+        sl_mode_layout.addWidget(self.sl_mode_switch)
+        sl_mode_layout.addStretch()
+        card_layout.addLayout(sl_mode_layout)
+
+        sl_mode_desc = QLabel("开启后商店筛选的「停止暗痕」将替换为「停止合格遗物数量」，\n"
+                             "暗痕不足时自动退出到标题画面恢复存档继续购买，直到达到目标数量")
+        sl_mode_desc.setFont(QFont("Segoe UI", 8))
+        sl_mode_desc.setStyleSheet("color: gray;")
+        sl_mode_desc.setWordWrap(True)
+        card_layout.addWidget(sl_mode_desc)
 
         return card
 
     def _create_developer_settings(self) -> CardWidget:
-        """创建开发者设置组（默认隐藏，彩蛋触发后显示）"""
+        """创建开发者设置组"""
         card = CardWidget()
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(20, 20, 20, 20)
@@ -263,9 +271,14 @@ class SettingsPage(QWidget):
         ocr_debug_layout.addStretch()
         card_layout.addLayout(ocr_debug_layout)
 
-        ocr_debug_desc = QLabel("开启后保存OCR识别的截图和结果到debug目录")
+        ocr_debug_desc = QLabel(
+            "开启后，仓库清理与商店购买在执行词条OCR时保存完整窗口及六行截图、原始识别、"
+            "纠错调用与阈值、词条库候选和最终预设匹配结果；识别失败也会记录，未进入OCR的遗物不会记录。"
+            "默认保存到debug_ocr/collections，每次启动清理或购买时单独建目录。"
+            "若设置NRRELIC_OCR_DIAGNOSTICS=1，关闭本开关仍会采集。")
         ocr_debug_desc.setFont(QFont("Segoe UI", 8))
         ocr_debug_desc.setStyleSheet("color: gray;")
+        ocr_debug_desc.setWordWrap(True)
         card_layout.addWidget(ocr_debug_desc)
 
         # 模板匹配阈值
@@ -304,43 +317,7 @@ class SettingsPage(QWidget):
         lum_desc.setStyleSheet("color: gray;")
         card_layout.addWidget(lum_desc)
 
-        # 根据合格遗物数量停止（SL模式）
-        sl_mode_layout = QHBoxLayout()
-        sl_mode_label = QLabel("根据合格遗物数量停止:")
-        sl_mode_label.setFixedWidth(180)
-        self.sl_mode_switch = SwitchButton()
-        self.sl_mode_switch.setChecked(self.settings.get("sl_mode_enabled", False))
-        self.sl_mode_switch.checkedChanged.connect(self._auto_save_settings)
-        sl_mode_layout.addWidget(sl_mode_label)
-        sl_mode_layout.addWidget(self.sl_mode_switch)
-        sl_mode_layout.addStretch()
-        card_layout.addLayout(sl_mode_layout)
-
-        sl_mode_desc = QLabel("开启后商店筛选的「停止暗痕」将替换为「停止合格遗物数量」，\n"
-                             "暗痕不足时自动退出到标题画面恢复存档继续购买，直到达到目标数量")
-        sl_mode_desc.setFont(QFont("Segoe UI", 8))
-        sl_mode_desc.setStyleSheet("color: gray;")
-        sl_mode_desc.setWordWrap(True)
-        card_layout.addWidget(sl_mode_desc)
-
         return card
-
-    def show_developer_settings(self):
-        """显示开发者设置（由关于页面彩蛋触发）"""
-        if not self.developer_card.isVisible():
-            self.developer_card.setVisible(True)
-            # 持久化开发者模式状态
-            self.settings["developer_mode"] = True
-            self._auto_save_settings()
-            InfoBar.success(
-                title="🎉 开发者模式已激活",
-                content="开发者设置已在设置页面底部显示",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-                parent=self
-            )
 
     def _export_presets(self):
         """导出预设配置文件"""
@@ -507,6 +484,8 @@ class SettingsPage(QWidget):
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
+                settings.pop("stop_on_perfect_relic", None)
+                settings["developer_mode"] = True  # 兼容旧版隐藏开发者设置的配置
                 return settings
         except Exception as e:
             print(f"[错误] 加载设置失败: {e}")
@@ -518,14 +497,13 @@ class SettingsPage(QWidget):
             "allow_operate_favorited": False,
             "require_double_valid": True,
             "shop_require_double_valid": True,
-            "stop_on_perfect_relic": False,
             "shop_stop_on_perfect_relic": False,
-            "steam_path": r"C:\Program Files (x86)\Steam",
+            "steam_path": "",
             "ocr_debug": False,
             "template_threshold": 0.7,
             "brightness_threshold": 45,
             "sl_mode_enabled": False,
-            "developer_mode": False
+            "developer_mode": True
         }
 
     def _auto_save_settings(self):
@@ -533,17 +511,17 @@ class SettingsPage(QWidget):
         old_steam_path = self.settings.get("steam_path", "")
 
         self.settings = {
+            **self.settings,
             "allow_operate_favorited": self.allow_favorited_switch.isChecked(),
             "require_double_valid": not self.require_double_switch.isChecked(),
             "shop_require_double_valid": not self.shop_require_double_switch.isChecked(),
-            "stop_on_perfect_relic": self.stop_on_perfect_switch.isChecked(),
             "shop_stop_on_perfect_relic": self.shop_stop_on_perfect_switch.isChecked(),
             "steam_path": self.steam_path_input.text(),
             "ocr_debug": self.ocr_debug_switch.isChecked() if hasattr(self, 'ocr_debug_switch') else self.settings.get("ocr_debug", False),
             "template_threshold": self._get_threshold_value(),
             "brightness_threshold": self._get_brightness_threshold_value(),
             "sl_mode_enabled": self.sl_mode_switch.isChecked() if hasattr(self, 'sl_mode_switch') else self.settings.get("sl_mode_enabled", False),
-            "developer_mode": self.developer_card.isVisible() if hasattr(self, 'developer_card') else self.settings.get("developer_mode", False)
+            "developer_mode": True
         }
 
         try:
@@ -624,11 +602,16 @@ class SettingsPage(QWidget):
         """获取当前设置"""
         return self.settings
 
+    def set_steam_path(self, steam_path: str):
+        """接收存档页选择的路径，并沿用现有设置保存与通知流程。"""
+        if self.steam_path_input.text() != steam_path:
+            self.steam_path_input.setText(steam_path)
+
     def _browse_steam_path(self):
         """浏览选择Steam安装目录"""
         dir_path = QFileDialog.getExistingDirectory(
             self, "选择Steam安装目录",
-            self.steam_path_input.text() or "C:\\Program Files (x86)\\Steam"
+            self.steam_path_input.text() or os.path.expanduser("~")
         )
         if dir_path:
             self.steam_path_input.setText(dir_path)

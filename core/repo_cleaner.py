@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 from core.relic_matcher import match_relic, log_match
 from core.relic_recorder import RelicRecorder
+from core.ocr_diagnostics import create_capture_session  # OCR 自动采集调试代码
 from core.preset_manager import PresetManager
 from core.ocr_engine import OCREngine
 from core.relic_detector import RELIC_STATE_UNKNOWN, RelicDetector, RELIC_STATE_LIGHT, RELIC_STATE_DARK_F, RELIC_STATE_DARK_FE, RELIC_STATE_DARK_E, RELIC_STATE_DARK_O
@@ -52,6 +53,7 @@ class RepoCleaner:
         self.repository_filter = RepositoryFilter(ocr_engine, settings)
 
         self.recorder = RelicRecorder()
+        self.ocr_debug_session = None  # OCR 自动采集调试代码
         self.stop_reason = None
 
         # 游戏窗口
@@ -110,6 +112,9 @@ class RepoCleaner:
                 log_debug(f"[{level}] {message}")
 
         try:
+            # ===== OCR 自动采集调试代码：每次清理建立独立会话；删除时移除此块及下方标记块 =====
+            self.ocr_debug_session = create_capture_session(self.settings, "repo", mode, log)
+            # ===== OCR 自动采集调试代码结束 =====
             # 0. 检测游戏窗口
             log("正在检测游戏窗口...", "INFO")
             self.game_window = self._find_game_window()
@@ -224,16 +229,30 @@ class RepoCleaner:
 
                 # OCR识别（使用6行单行ROI）
                 t_start = time.time()
-                line_images = self.repository_filter.capture_line_rois()
+                # ===== OCR 自动采集调试代码：采集与 OCR 使用完全相同的一次截图 =====
+                ocr_screen = None
+                if self.ocr_debug_session:
+                    line_images, ocr_screen = self.repository_filter.capture_line_rois(with_screen=True)
+                else:
+                    line_images = self.repository_filter.capture_line_rois()
+                ocr_trace = {} if self.ocr_debug_session else None
+                # ===== OCR 自动采集调试代码结束 =====
                 t_roi = time.time() - t_start
 
                 t_start = time.time()
                 ocr_result = self.ocr_engine.recognize_with_classification_from_lines(
-                    line_images, mode)
+                    line_images, mode, trace=ocr_trace)
                 t_ocr = time.time() - t_start
                 log(f"识别词条完成 (截取ROI:{t_roi:.3f}s OCR:{t_ocr:.3f}s)", "INFO")
 
                 if not ocr_result["success"]:
+                    # ===== OCR 自动采集调试代码：失败样本也保留 =====
+                    if self.ocr_debug_session:
+                        self.ocr_debug_session.record(
+                            ocr_screen, line_images, ocr_result, ocr_trace, None,
+                            self.ocr_engine, self.stats["total_detected"],
+                            {"cleaning_mode": cleaning_mode, "relic_state": relic_state})
+                    # ===== OCR 自动采集调试代码结束 =====
                     # 检查是否是手动停止导致的识别失败
                     if self.is_running:
                         # 正常运行中的识别失败，输出错误信息
@@ -264,16 +283,21 @@ class RepoCleaner:
                 )
                 t_match = time.time() - t_start
 
+                # ===== OCR 自动采集调试代码：在任何售出/收藏按键前写入完整证据和实际匹配结果 =====
+                if self.ocr_debug_session:
+                    self.ocr_debug_session.record(
+                        ocr_screen, line_images, ocr_result, ocr_trace, match_result,
+                        self.ocr_engine, self.stats["total_detected"],
+                        {"cleaning_mode": cleaning_mode, "relic_state": relic_state,
+                         "required_effective_count": 2 if require_double else 3})
+                # ===== OCR 自动采集调试代码结束 =====
+
                 if match_result.qualified:
                     self.stats["qualified"] += 1
                     self.matched_relics.append({"index": self.stats["total_detected"],
                                                 "affixes": ocr_result["affixes"], "match": match_result})
                     self._record_match(mode, ocr_result, match_result, log)
                     log_match(match_result, self.stats["total_detected"], log)
-                    if match_result.perfect and self.settings.get("stop_on_perfect_relic", False):
-                        self.stop_reason = "perfect_relic"
-                        self.is_running = False
-                        break
                 else:
                     log_match(match_result, self.stats["total_detected"], log)
                     self.stats["unqualified"] += 1
@@ -365,7 +389,7 @@ class RepoCleaner:
 
     def stop_cleaning(self):
         """停止清理"""
-        if self.is_running and self.stop_reason != "perfect_relic":
+        if self.is_running:
             self.stop_reason = "manual"
         self.is_running = False
 

@@ -9,19 +9,15 @@ import shutil
 from datetime import datetime
 from core.utils import get_user_data_path, log_debug
 
+try:
+    import winreg
+except ImportError:  # 非 Windows 环境下仍可运行路径相关测试
+    winreg = None
+
 
 
 class SaveManager:
     """存档管理器"""
-
-    # 默认Steam安装路径
-    DEFAULT_STEAM_PATHS = [
-        r"C:\Program Files (x86)\Steam",
-        r"C:\Program Files\Steam",
-        r"D:\Steam",
-        r"D:\Program Files (x86)\Steam",
-        r"D:\Program Files\Steam",
-    ]
 
     # 存档目录
     SAVE_DIR_BASE = os.path.join(os.environ.get("APPDATA", ""), "Nightreign")
@@ -31,19 +27,91 @@ class SaveManager:
     BACKUP_DIR = get_user_data_path("data/save_backups")
 
     def __init__(self, steam_path: str = ""):
-
-        self.steam_path = steam_path or self._detect_steam_path()
+        configured_path = self._normalize_steam_path(steam_path)
+        self.steam_path = (configured_path if self.is_valid_steam_path(configured_path)
+                           else self.detect_steam_path())
         self.users = {}
         self._load_steam_users()
         os.makedirs(self.BACKUP_DIR, exist_ok=True)
 
-    def _detect_steam_path(self) -> str:
-        """自动检测Steam安装路径"""
-        for path in self.DEFAULT_STEAM_PATHS:
-            vdf_path = os.path.join(path, "config", "loginusers.vdf")
-            if os.path.exists(vdf_path):
-                return path
-        return ""
+    @staticmethod
+    def _normalize_steam_path(path: str) -> str:
+        """接受注册表中的 SteamPath、SteamExe 以及手动选择的目录。"""
+        if not path:
+            return ""
+        path = str(path).strip().strip('"').strip()
+        if not path:
+            return ""
+        path = os.path.normpath(os.path.expandvars(path))
+        if os.path.basename(path).lower() == "steam.exe":
+            path = os.path.dirname(path)
+        return path
+
+    @classmethod
+    def is_valid_steam_path(cls, path: str) -> bool:
+        """安装目录应包含 Steam 程序或已登录用户配置。"""
+        path = cls._normalize_steam_path(path)
+        return bool(path) and (
+            os.path.isfile(os.path.join(path, "steam.exe")) or
+            os.path.isfile(os.path.join(path, "config", "loginusers.vdf"))
+        )
+
+    @staticmethod
+    def _registry_steam_paths():
+        """优先读取 Steam 官方安装信息，覆盖任意盘符和自定义目录。"""
+        if winreg is None:
+            return []
+        locations = (
+            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", ("SteamPath", "SteamExe")),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", ("InstallPath", "SteamPath")),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", ("InstallPath", "SteamPath")),
+        )
+        paths = []
+        for hive, key_name, value_names in locations:
+            try:
+                with winreg.OpenKey(hive, key_name) as key:
+                    for value_name in value_names:
+                        try:
+                            value, _ = winreg.QueryValueEx(key, value_name)
+                            if value:
+                                paths.append(value)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return paths
+
+    @classmethod
+    def detect_steam_path(cls) -> str:
+        """注册表优先；失效时检查所有盘符上的常见安装目录。"""
+        candidates = list(cls._registry_steam_paths())
+        try:
+            drives = os.listdrives()
+        except (AttributeError, OSError):
+            drives = []
+        for drive in drives:
+            candidates.extend(os.path.join(drive, suffix) for suffix in (
+                "Steam", os.path.join("Program Files (x86)", "Steam"),
+                os.path.join("Program Files", "Steam"),
+                os.path.join("Games", "Steam"), os.path.join("Apps", "Steam"),
+            ))
+        candidates.extend(os.path.join(os.environ[name], "Steam")
+                          for name in ("ProgramFiles(x86)", "ProgramFiles")
+                          if os.environ.get(name))
+
+        seen = set()
+        configuration_only_path = ""
+        for candidate in candidates:
+            path = cls._normalize_steam_path(candidate)
+            key = os.path.normcase(path)
+            if key not in seen:
+                seen.add(key)
+                if cls.is_valid_steam_path(path):
+                    if os.path.isfile(os.path.join(path, "steam.exe")):
+                        return path
+                    if not configuration_only_path:
+                        configuration_only_path = path
+        return configuration_only_path
 
     def _parse_vdf(self, content: str) -> dict:
         """简易VDF解析器"""
@@ -236,5 +304,7 @@ class SaveManager:
 
     def set_steam_path(self, steam_path: str):
         """设置Steam路径并重新加载用户"""
-        self.steam_path = steam_path
+        configured_path = self._normalize_steam_path(steam_path)
+        self.steam_path = (configured_path if self.is_valid_steam_path(configured_path)
+                           else self.detect_steam_path())
         self._load_steam_users()

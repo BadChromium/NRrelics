@@ -13,6 +13,7 @@ from typing import Optional
 
 from core.relic_matcher import match_relic, log_match
 from core.relic_recorder import RelicRecorder
+from core.ocr_diagnostics import create_capture_session  # OCR 自动采集调试代码
 from core.preset_manager import PresetManager
 from core.utils import DEBUG_ENABLED, debug_timer, affix_recorder, log_debug
 
@@ -77,6 +78,7 @@ class ShopAutomation:
         self.repo_filter = repo_filter
         self.settings = settings
         self.recorder = RelicRecorder()
+        self.ocr_debug_session = None  # OCR 自动采集调试代码
         self.stop_reason = None
 
         # 运行状态
@@ -138,6 +140,9 @@ class ShopAutomation:
             log("收到停止信号，正在停止购买...", "WARNING")
 
         try:
+            # ===== OCR 自动采集调试代码：每次购买建立独立会话；删除时移除此块及下方标记块 =====
+            self.ocr_debug_session = create_capture_session(self.settings, "shop", mode, log)
+            # ===== OCR 自动采集调试代码结束 =====
             keyboard.add_hotkey('0', on_zero_pressed)
             # 刷新窗口信息
             self.repo_filter.refresh_window_info()
@@ -380,7 +385,7 @@ class ShopAutomation:
             log(f"暗痕转换失败: {digits}", "WARNING")
             return -1
 
-    def _capture_shop_line_rois(self) -> list:
+    def _capture_shop_line_rois(self, with_screen: bool = False) -> list:
         """
         截取商店界面6行单行ROI区域（用于单行OCR识别）
 
@@ -389,7 +394,8 @@ class ShopAutomation:
         """
         window_image = self.repo_filter._capture_game_window()
         if window_image is None:
-            return [np.zeros((100, 100, 3), dtype=np.uint8) for _ in self.SHOP_LINE_ROI_COORDS]
+            empty = [np.zeros((100, 100, 3), dtype=np.uint8) for _ in self.SHOP_LINE_ROI_COORDS]
+            return (empty, None) if with_screen else empty
 
         line_images = []
         for y_start, y_end in self.SHOP_LINE_ROI_COORDS:
@@ -397,7 +403,9 @@ class ShopAutomation:
             x1, y1, x2, y2 = self.repo_filter._scale_region(region)
             line_images.append(window_image[y1:y2, x1:x2])
 
-        return line_images
+        # ===== OCR 自动采集调试代码：返回与六行 ROI 同一次拍摄的完整截图 =====
+        return (line_images, window_image) if with_screen else line_images
+        # ===== OCR 自动采集调试代码结束 =====
 
     def _find_relic(self, log) -> bool:
         """滚动寻找遗物（通过OCR识别价格是否为600）"""
@@ -533,7 +541,14 @@ class ShopAutomation:
             if DEBUG_ENABLED:
                 debug_timer.start(f"relic_{i+1}_capture")
 
-            line_images = self._capture_shop_line_rois()
+            # ===== OCR 自动采集调试代码：采集与 OCR 使用完全相同的一次截图 =====
+            ocr_screen = None
+            if self.ocr_debug_session:
+                line_images, ocr_screen = self._capture_shop_line_rois(with_screen=True)
+            else:
+                line_images = self._capture_shop_line_rois()
+            ocr_trace = {} if self.ocr_debug_session else None
+            # ===== OCR 自动采集调试代码结束 =====
 
             if DEBUG_ENABLED:
                 capture_time = debug_timer.end(f"relic_{i+1}_capture")
@@ -544,7 +559,7 @@ class ShopAutomation:
                 debug_timer.start(f"relic_{i+1}_ocr")
 
             ocr_result = self.ocr_engine.recognize_with_classification_from_lines(
-                line_images, mode)
+                line_images, mode, trace=ocr_trace)
 
             if DEBUG_ENABLED:
                 ocr_time = debug_timer.end(f"relic_{i+1}_ocr")
@@ -554,8 +569,23 @@ class ShopAutomation:
                 # 这些时间已经在OCR引擎中记录过了
 
             if not self.is_running:
+                # ===== OCR 自动采集调试代码：停止发生在 OCR 期间时也保存本次样本 =====
+                if self.ocr_debug_session:
+                    self.ocr_debug_session.record(
+                        ocr_screen, line_images, ocr_result, ocr_trace, None,
+                        self.ocr_engine, self.stats["total_purchased"] - 10 + i + 1,
+                        {"batch_position": i + 1, "batch_end": self.stats["total_purchased"],
+                         "stopped_before_matching": True})
+                # ===== OCR 自动采集调试代码结束 =====
                 return
             if not ocr_result["success"]:
+                # ===== OCR 自动采集调试代码：失败样本也保留 =====
+                if self.ocr_debug_session:
+                    self.ocr_debug_session.record(
+                        ocr_screen, line_images, ocr_result, ocr_trace, None,
+                        self.ocr_engine, self.stats["total_purchased"] - 10 + i + 1,
+                        {"batch_position": i + 1, "batch_end": self.stats["total_purchased"]})
+                # ===== OCR 自动采集调试代码结束 =====
                 log("OCR识别失败，跳过", "ERROR")
                 pydirectinput.press('right')
                 continue
@@ -586,6 +616,15 @@ class ShopAutomation:
                 ocr_result, general_preset, dedicated_presets,
                 blacklist_preset, require_double
             )
+
+            # ===== OCR 自动采集调试代码：在任何售出/保留按键前写入完整证据和实际匹配结果 =====
+            if self.ocr_debug_session:
+                self.ocr_debug_session.record(
+                    ocr_screen, line_images, ocr_result, ocr_trace, match_result,
+                    self.ocr_engine, self.stats["total_purchased"] - 10 + i + 1,
+                    {"batch_position": i + 1, "batch_end": self.stats["total_purchased"],
+                     "required_effective_count": 2 if require_double else 3})
+            # ===== OCR 自动采集调试代码结束 =====
 
             if DEBUG_ENABLED:
                 match_time = debug_timer.end(f"relic_{i+1}_match")

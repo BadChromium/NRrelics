@@ -96,9 +96,7 @@ class MainWindow(FluentWindow):
 
         # 连接Steam路径变更信号
         self.settings_page.steam_path_changed.connect(self.save_page.update_steam_path)
-
-        # 连接关于页面彩蛋信号 → 设置页面显示开发者设置
-        self.about_page.developer_mode_activated.connect(self.settings_page.show_developer_settings)
+        self.save_page.steam_path_selected.connect(self.settings_page.set_steam_path)
 
         # 连接设置变更信号 → 商店页面更新设置
         self.settings_page.settings_changed.connect(self.shop_page.update_settings)
@@ -106,6 +104,12 @@ class MainWindow(FluentWindow):
         # 连接预设变更信号：当任一页面修改预设时，通知另一页面刷新
         self.shop_page.presets_modified.connect(self._on_presets_changed)
         self.repo_page.presets_modified.connect(self._on_presets_changed)
+
+        # 旧配置可能仍指向失效的 C 盘默认目录；将实际检测到的路径同步给所有页面。
+        configured_path = self.settings_page.get_settings().get("steam_path", "")
+        detected_path = self.save_page.save_manager.steam_path
+        if detected_path and not self.save_page.save_manager.is_valid_steam_path(configured_path):
+            self.settings_page.set_steam_path(detected_path)
 
     def _on_presets_changed(self):
         """预设变更时，通知所有页面刷新"""
