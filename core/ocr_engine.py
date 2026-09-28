@@ -197,6 +197,47 @@ def split_entries(text: str) -> list:
     return processed_entries
 
 
+def split_missing_separator_entries(entries: list, positive_vocabulary: list,
+                                    negative_vocabulary: list,
+                                    negative_corrector: EntryCorrector = None,
+                                    known_vocabulary: list = None) -> list:
+    """Recover one omitted separator only when its two signed halves are unambiguous."""
+    positive_vocabulary = list(dict.fromkeys(positive_vocabulary or []))
+    negative_vocabulary = list(dict.fromkeys(negative_vocabulary or []))
+    if not positive_vocabulary or not negative_vocabulary:
+        return [[entry] for entry in entries]
+    negative_corrector = negative_corrector or EntryCorrector(negative_vocabulary)
+    known_vocabulary = set(known_vocabulary or [])
+    repaired = []
+    for entry in entries:
+        if entry in known_vocabulary:
+            repaired.append([entry])
+            continue
+        candidates = []
+        for positive in positive_vocabulary:
+            if not entry.startswith(positive):
+                continue
+            suffix = entry[len(positive):]
+            if not suffix:
+                continue
+            scores = [
+                (negative_corrector._calculate_similarity(suffix, negative), negative)
+                for negative in negative_vocabulary
+            ]
+            scores.sort(reverse=True)
+            if not scores:
+                continue
+            best_score, best_negative = scores[0]
+            threshold = negative_corrector._get_dynamic_threshold(suffix)
+            credible = [negative for score, negative in scores if score >= threshold]
+            if best_score >= threshold and len(credible) == 1:
+                candidates.append((positive, best_negative))
+        repaired.append(
+            list(candidates[0]) if len(candidates) == 1 else [entry]
+        )
+    return repaired
+
+
 def correct_entries(entries: list, corrector: EntryCorrector) -> list:
     """
     对词条列表进行纠错，支持动态断行合并
@@ -648,6 +689,17 @@ class OCREngine:
 
                 # 处理文本（符号标准化、分割词条）
                 raw_entries = split_entries(text)
+                if mode == "deepnight":
+                    raw_entries = [
+                        part
+                        for entry in split_missing_separator_entries(
+                            raw_entries, getattr(self, "vocabulary_pos", []),
+                            getattr(self, "vocabulary_neg", []),
+                            EntryCorrector(getattr(self, "vocabulary_neg", [])),
+                            getattr(self.corrector, "vocabulary", []),
+                        )
+                        for part in entry
+                    ]
 
                 # 先进行断行合并和纠错，获取详细信息
                 corrected_info = []
@@ -779,6 +831,17 @@ class OCREngine:
                 # 处理文本（符号标准化、分割词条）
                 split_start = time.time()
                 raw_entries = split_entries(combined_text)
+                if mode == "deepnight":
+                    raw_entries = [
+                        part
+                        for entry in split_missing_separator_entries(
+                            raw_entries, getattr(self, "vocabulary_pos", []),
+                            getattr(self, "vocabulary_neg", []),
+                            EntryCorrector(getattr(self, "vocabulary_neg", [])),
+                            getattr(self.corrector, "vocabulary", []),
+                        )
+                        for part in entry
+                    ]
                 split_time = (time.time() - split_start) * 1000
 
                 # 先进行断行合并和纠错，获取详细信息

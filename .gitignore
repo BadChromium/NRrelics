@@ -5,6 +5,7 @@ data/save_backups/
 CLAUDE.md
 logs/
 *.json
+!data/affix_catalog.json
 *.backup
 
 # --- Python 核心 ---
@@ -54,3 +55,5 @@ htmlcov/
 Thumbs.db
 data/presets.json
 data/presets.json
+
+data/relic_history.jsonl

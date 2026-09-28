@@ -16,6 +16,7 @@ _static_data = [
     ('data/normal_special.txt', 'data'),
     ('data/deepnight_pos.txt', 'data'),
     ('data/deepnight_neg.txt', 'data'),
+    ('data/affix_catalog.json', 'data'),
     ('data/icon_cup.png', 'data'),
     ('data/icon_bookmark.png', 'data'),
 ]
