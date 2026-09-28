@@ -439,7 +439,11 @@ class PageShop(QWidget):
             drag_drop_container.reorder_requested.connect(self._handle_preset_reorder)
 
             for preset in dedicated_presets.values():
-                card = PresetCard(preset, is_general=False)
+                card = PresetCard(
+                    preset, is_general=False,
+                    inherited_affixes=general_preset.get("affixes", [])
+                    if general_preset and general_preset.get("is_active", True) else []
+                )
                 card.edit_clicked.connect(self._edit_dedicated_preset)
                 card.delete_clicked.connect(self._delete_preset)
                 card.toggle_clicked.connect(self._toggle_preset)
@@ -540,13 +544,20 @@ class PageShop(QWidget):
             for_editing=True
         )
 
-        dialog = PresetEditDialog(vocab, None, is_general=False, parent=self)
-        dialog.preset_saved.connect(lambda pid, name, affixes: self._save_dedicated_preset(mode, name, affixes))
+        general = self.preset_manager.get_general_preset(mode)
+        dialog = PresetEditDialog(vocab, None, is_general=False, parent=self, mode=mode,
+                                  inherited_vocabulary=general.get("affixes", [])
+                                  if general and general.get("is_active", True) else [],
+                                  exception_vocabulary=self.preset_manager.load_vocabulary("deepnight_blacklist")
+                                  if mode == "deepnight" else [])
+        dialog.grouped_saved.connect(lambda pid, name, affixes, groups, exceptions: self._save_dedicated_preset(mode, name, affixes, groups, exceptions))
         dialog.exec()
 
-    def _save_dedicated_preset(self, mode: str, name: str, affixes: list):
+    def _save_dedicated_preset(self, mode: str, name: str, affixes: list, groups=None, exceptions=None):
         """保存专用预设"""
-        self.preset_manager.create_dedicated_preset(mode, name, affixes)
+        self.preset_manager.create_dedicated_preset(mode, name, affixes,
+                                                    blacklist_exceptions=exceptions,
+                                                    required_affix_groups=groups)
         self._refresh_presets()
         self.presets_modified.emit()  # 发出预设修改信号
         InfoBar.success("创建成功", f"专用预设 \"{name}\" 已创建", parent=self)
@@ -566,13 +577,25 @@ class PageShop(QWidget):
             for_editing=True
         )
 
-        dialog = PresetEditDialog(vocab, preset, is_general=False, parent=self)
-        dialog.preset_saved.connect(lambda pid, name, affixes: self._update_dedicated_preset(mode, pid, name, affixes))
+        general = self.preset_manager.get_general_preset(mode)
+        dialog = PresetEditDialog(vocab, preset, is_general=False, parent=self, mode=mode,
+                                  inherited_vocabulary=general.get("affixes", [])
+                                  if general and general.get("is_active", True) else [],
+                                  exception_vocabulary=self.preset_manager.load_vocabulary("deepnight_blacklist")
+                                  if mode == "deepnight" else [])
+        dialog.grouped_saved.connect(lambda pid, name, affixes, groups, exceptions: self._update_dedicated_preset(mode, pid, name, affixes, groups, exceptions))
         dialog.exec()
 
-    def _update_dedicated_preset(self, mode: str, preset_id: str, name: str, affixes: list):
+    def _update_dedicated_preset(self, mode: str, preset_id: str, name: str, affixes: list, groups=None, exceptions=None):
         """更新专用预设"""
-        self.preset_manager.update_dedicated_preset(mode, preset_id, name, affixes)
+        try:
+            self.preset_manager.update_dedicated_preset(
+                mode, preset_id, name, affixes,
+                blacklist_exceptions=exceptions,
+                required_affix_groups=groups)
+        except ValueError as e:
+            MessageBox("错误", f"保存预设失败: {e}", self).exec()
+            return
         self._refresh_presets()
         self.presets_modified.emit()  # 发出预设修改信号
         InfoBar.success("保存成功", f"专用预设 \"{name}\" 已更新", parent=self)
@@ -629,12 +652,17 @@ class PageShop(QWidget):
             InfoBar.error("错误", "OCR 引擎未加载，请稍后再试", parent=self)
             return
 
+        self.settings = self._load_settings()
+        if self.shop_automation:
+            self.shop_automation.settings = self.settings
+            self.shop_automation.repo_filter.settings = self.settings
+
         # 初始化商店自动化（延迟初始化）
         if not self.shop_automation:
             from core.shop_automation import ShopAutomation
             from core.automation import RepositoryFilter
 
-            repo_filter = RepositoryFilter(self.settings)
+            repo_filter = RepositoryFilter(ocr_engine=self.ocr_engine, settings=self.settings)
             self.shop_automation = ShopAutomation(
                 self.ocr_engine,
                 self.preset_manager,
@@ -647,14 +675,7 @@ class PageShop(QWidget):
         version = "new" if self.version_combo.currentIndex() == 0 else "old"
         stop_currency = int(self.currency_input.text() or "0")
 
-        # 获取商店三有效设置
-        settings_file = get_user_data_path("data/settings.json")
-        require_double = True  # 默认双有效
-        if os.path.exists(settings_file):
-
-            with open(settings_file, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-                require_double = settings.get("shop_require_double_valid", True)
+        require_double = self.settings.get("shop_require_double_valid", True)
 
         # SL 模式参数
         sl_mode_enabled = self.settings.get("sl_mode_enabled", False)
@@ -759,10 +780,14 @@ class PageShop(QWidget):
         """购买完成"""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        if self.log_manager:
-            self.log_manager.log("购买已完成", "INFO")
-        else:
-            self.logger.log("购买已完成", "INFO")
+        reason = self.shop_automation.stop_reason
+        messages = {
+            "perfect_relic": ("发现完美遗物，已保留并停止购买", "SUCCESS"),
+            "manual": ("购买已手动停止", "WARNING"),
+            "completed": ("购买已完成", "SUCCESS"),
+            "error": ("购买异常停止，请检查日志", "ERROR"),
+        }
+        self._on_log(*messages.get(reason, messages["error"]))
 
     def _add_qualified_relic(self, relic_info: dict):
         """添加合格遗物到UI和持久化存储"""

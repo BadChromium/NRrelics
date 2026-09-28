@@ -9,15 +9,19 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, Signal
 from qfluentwidgets import (LineEdit, PrimaryPushButton, PushButton,
                            MessageBox, InfoBar, InfoBarPosition, isDarkTheme)
+from core.affix_catalog import AffixCatalog, normalize_name
 
 
 class PresetEditDialog(QDialog):
     """预设编辑对话框"""
 
     # 信号
+    dedicated_saved = Signal(str, str, list, list, list)
+    grouped_saved = Signal(str, str, list, list, list)
     preset_saved = Signal(str, str, list)  # (preset_id, name, affixes)
 
-    def __init__(self, vocabulary: list, preset_data: dict = None, is_general: bool = False, parent=None):
+    def __init__(self, vocabulary: list, preset_data: dict = None, is_general: bool = False, parent=None,
+                 mode="normal", exception_vocabulary=None, inherited_vocabulary=None):
         """
         初始化对话框
 
@@ -28,8 +32,32 @@ class PresetEditDialog(QDialog):
             parent: 父窗口
         """
         super().__init__(parent)
-        self.vocabulary = vocabulary
+        self.inherited_vocabulary = set(inherited_vocabulary or [])
+        self.vocabulary = list(vocabulary)
+        for value in self.inherited_vocabulary:
+            if value not in self.vocabulary:
+                self.vocabulary.append(value)
         self.preset_data = preset_data
+        if preset_data:
+            for value in preset_data.get("affixes", []):
+                if value not in self.vocabulary:
+                    self.vocabulary.append(value)
+            imported_groups = preset_data.get("required_affix_groups")
+            imported_required = (
+                [member for group in imported_groups if isinstance(group, list)
+                 for member in group]
+                if isinstance(imported_groups, list)
+                else preset_data.get("required_affixes", [])
+            )
+            for value in imported_required:
+                if isinstance(value, str) and value not in self.vocabulary:
+                    self.vocabulary.append(value)
+        self.mode = mode
+        self.exception_vocabulary = exception_vocabulary or []
+        self.affix_catalog = AffixCatalog()
+        self.required_list = None
+        self.required_groups_list = None
+        self.exceptions_list = None
         self.is_general = is_general
         self.is_edit_mode = preset_data is not None
 
@@ -38,6 +66,15 @@ class PresetEditDialog(QDialog):
 
         self._init_ui()
         self._load_preset_data()
+        self._sync_required()
+        if self.required_list is not None:
+            groups = (self.preset_data or {}).get("required_affix_groups")
+            required = ([a for group in groups if isinstance(group, list)
+                         for a in group if isinstance(a, str)] if isinstance(groups, list)
+                        else (self.preset_data or {}).get("required_affixes", []))
+            for i in range(self.required_list.count()):
+                item = self.required_list.item(i)
+                item.setCheckState(Qt.Checked if item.text() in required else Qt.Unchecked)
 
     def _init_ui(self):
         """初始化UI"""
@@ -107,11 +144,58 @@ class PresetEditDialog(QDialog):
         # 添加词条到列表
         for vocab in self.vocabulary:
             item = QListWidgetItem(vocab)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+            if vocab in self.inherited_vocabulary and vocab not in (self.preset_data or {}).get("affixes", []):
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+                item.setData(Qt.UserRole + 1, True)
+                item.setToolTip("来自当前启用的通用预设；可加入必须词条组，但不会复制到专用词条")
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
             self.vocab_list.addItem(item)
 
         layout.addWidget(self.vocab_list)
+
+        if not self.is_general:
+            layout.addWidget(QLabel("候选词条：勾选后点击加入/更新组才生效（仅已选有效词条）"))
+            self.required_list = QListWidget()
+            self.required_list.setMaximumHeight(110)
+            layout.addWidget(self.required_list)
+            layout.addWidget(QLabel("必须词条组：组内满足任一词条，组与组之间都必须满足"))
+            self.required_groups_list = QListWidget()
+            self.required_groups_list.setMaximumHeight(120)
+            self.required_groups_list.currentRowChanged.connect(self._load_group_selection)
+            layout.addWidget(self.required_groups_list)
+            self.group_warning_label = QLabel()
+            self.group_warning_label.setWordWrap(True)
+            self.group_warning_label.setStyleSheet("color: #b06a00;")
+            self.group_warning_label.setVisible(False)
+            layout.addWidget(self.group_warning_label)
+            group_buttons = QHBoxLayout()
+            add_group = PushButton("将勾选词条加入同一 OR 组")
+            add_group.clicked.connect(self._add_required_group)
+            family_group = PushButton("加入已验证同族候选")
+            family_group.clicked.connect(self._add_family_alternatives)
+            edit_group = PushButton("更新选中组")
+            edit_group.clicked.connect(self._update_required_group)
+            remove_group = PushButton("删除选中组")
+            remove_group.clicked.connect(self._remove_required_group)
+            group_buttons.addWidget(add_group)
+            group_buttons.addWidget(family_group)
+            group_buttons.addWidget(edit_group)
+            group_buttons.addWidget(remove_group)
+            group_buttons.addStretch()
+            layout.addLayout(group_buttons)
+            if self.mode == "deepnight":
+                layout.addWidget(QLabel("黑名单例外（仅容忍，不计有效；与全局黑名单交集生效）"))
+                self.exceptions_list = QListWidget()
+                self.exceptions_list.setMaximumHeight(110)
+                selected = (self.preset_data or {}).get("blacklist_exceptions", [])
+                for text in self.exception_vocabulary:
+                    item = QListWidgetItem(text)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked if text in selected else Qt.Unchecked)
+                    self.exceptions_list.addItem(item)
+                layout.addWidget(self.exceptions_list)
 
         # 统计信息
         self.count_label = QLabel("已选择: 0 条")
@@ -266,6 +350,7 @@ class PresetEditDialog(QDialog):
         # 更新计数和排序（只在加载时执行一次）
         self._update_count()
         self._sort_items()
+        self._load_required_groups()
 
     def _filter_vocabulary(self, text: str):
         """过滤词条列表"""
@@ -278,6 +363,178 @@ class PresetEditDialog(QDialog):
         count = sum(1 for i in range(self.vocab_list.count())
                    if self.vocab_list.item(i).checkState() == Qt.Checked)
         self.count_label.setText(f"已选择: {count} 条")
+        self._sync_required()
+
+    @staticmethod
+    def _checked_items(widget):
+        if widget is None:
+            return []
+        return [widget.item(i).text() for i in range(widget.count())
+                if widget.item(i).checkState() == Qt.Checked]
+
+    def _sync_required(self):
+        if self.required_list is None:
+            return
+        selected = set(self._checked_items(self.required_list)) & (
+            set(self.get_selected_affixes()) | self.inherited_vocabulary
+        )
+        existing = {
+            member for group in self._current_required_groups()
+            if isinstance(group, list) for member in group if isinstance(member, str)
+        }
+        self.required_list.clear()
+        for text in dict.fromkeys(
+                self.get_selected_affixes() + list(self.inherited_vocabulary) + list(existing)):
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if text in selected else Qt.Unchecked)
+            self.required_list.addItem(item)
+        self._update_group_warnings()
+
+    def _load_required_groups(self):
+        if self.required_groups_list is None:
+            return
+        self.required_groups_list.clear()
+        data = self.preset_data or {}
+        groups = data.get("required_affix_groups")
+        if "required_affix_groups" not in data:
+            legacy = data.get("required_affixes", [])
+            groups = [[a] for a in legacy] if isinstance(legacy, list) else [legacy]
+        if not isinstance(groups, list):
+            groups = [groups]  # Preserve malformed imports until explicitly repaired/deleted.
+        for group in groups:
+            item = QListWidgetItem(
+                " 或 ".join(str(a) for a in group) if isinstance(group, list)
+                else "无效组：" + repr(group)
+            )
+            item.setData(Qt.UserRole, group)
+            self.required_groups_list.addItem(item)
+        self._update_group_warnings()
+
+    def _current_required_groups(self):
+        if self.required_groups_list is None:
+            return []
+        groups = []
+        for i in range(self.required_groups_list.count()):
+            item = self.required_groups_list.item(i)
+            value = item.data(Qt.UserRole)
+            groups.append(value if value is not None else item.text())
+        return groups
+
+    def _add_required_group(self):
+        selected = self._checked_items(self.required_list)
+        if not selected:
+            return
+        item = QListWidgetItem(" 或 ".join(selected))
+        item.setData(Qt.UserRole, list(selected))
+        self.required_groups_list.addItem(item)
+        for i in range(self.required_list.count()):
+            self.required_list.item(i).setCheckState(Qt.Unchecked)
+        self._update_group_warnings()
+
+    def _load_group_selection(self, row):
+        groups = self._current_required_groups()
+        group = groups[row] if 0 <= row < len(groups) else []
+        selected = {a for a in group if isinstance(a, str)} if isinstance(group, list) else set()
+        for i in range(self.required_list.count()):
+            item = self.required_list.item(i)
+            item.setCheckState(Qt.Checked if item.text() in selected else Qt.Unchecked)
+
+    def _update_required_group(self):
+        row = self.required_groups_list.currentRow()
+        if row < 0:
+            return
+        selected = self._checked_items(self.required_list)
+        if not selected:
+            return
+        item = self.required_groups_list.item(row)
+        item.setData(Qt.UserRole, list(selected))
+        item.setText(" 或 ".join(selected))
+        self._update_group_warnings()
+
+    def _remove_required_group(self):
+        row = self.required_groups_list.currentRow()
+        if row >= 0:
+            self.required_groups_list.takeItem(row)
+            self._update_group_warnings()
+
+    def _add_family_alternatives(self):
+        row = self.required_groups_list.currentRow()
+        if row < 0:
+            return
+        group = self._current_required_groups()[row]
+        if not isinstance(group, list):
+            return
+        selected = set(self.get_selected_affixes()) | self.inherited_vocabulary
+        normalized_selected = {normalize_name(name): name for name in selected}
+        alternatives = {
+            normalized_selected[normalize_name(name)]
+            for entry in group
+            for name in self.affix_catalog.alternatives(normalize_name(entry))
+            if normalize_name(name) in normalized_selected
+        }
+        additions = sorted(alternatives - set(group))
+        if additions:
+            group.extend(additions)
+            item = self.required_groups_list.item(row)
+            item.setData(Qt.UserRole, group)
+            item.setText(" 或 ".join(group))
+            self._update_group_warnings()
+
+    def _update_group_warnings(self):
+        if self.required_groups_list is None:
+            return
+        groups = self._current_required_groups()
+        if any(not isinstance(g, list) or not g or
+               any(not isinstance(a, str) or not a.strip() for a in g) for g in groups):
+            self._show_group_error("必须词条组格式无效，请修正或删除无效组。")
+            return
+        warnings = self.affix_catalog.compatibility_warnings(groups)
+        if warnings:
+            text = "提示：组间可能存在兼容性冲突：" + "、".join(
+                f"组{left}与组{right}" for left, right in warnings
+            )
+            self.group_warning_label.setText(text)
+            self.group_warning_label.setVisible(True)
+        else:
+            self.group_warning_label.clear()
+            self.group_warning_label.setVisible(False)
+
+    def _validate_required_groups(self):
+        selected = set(self.get_selected_affixes()) | self.inherited_vocabulary
+        for group in self._current_required_groups():
+            if not isinstance(group, list) or not group:
+                self._show_group_error("必须词条组格式无效：每组至少需要一个词条。")
+                return False
+            if any(not isinstance(member, str) or not member.strip()
+                   for member in group):
+                self._show_group_error("必须词条组格式无效：词条不能为空。")
+                return False
+            if any(member not in selected for member in group):
+                self._show_group_error("必须词条组包含未选择的词条，请修正或删除该组。")
+                return False
+        self._show_group_error("")
+        return True
+
+    def _show_group_error(self, text):
+        self.group_warning_label.setText(text)
+        self.group_warning_label.setVisible(bool(text))
+
+    def _emit_saved(self, preset_id, name, affixes):
+        if self.is_general:
+            self.preset_saved.emit(preset_id, name, affixes)
+        else:
+            groups = self._current_required_groups()
+            flattened = [
+                member for group in groups if isinstance(group, list)
+                for member in group
+            ]
+            self.dedicated_saved.emit(preset_id, name, affixes,
+                                      flattened,
+                                      self._checked_items(self.exceptions_list))
+            self.grouped_saved.emit(preset_id, name, affixes,
+                                    groups,
+                                    self._checked_items(self.exceptions_list))
 
     def _sort_items(self):
         """将已勾选的词条置顶"""
@@ -288,17 +545,23 @@ class PresetEditDialog(QDialog):
         items = []
         for i in range(self.vocab_list.count()):
             item = self.vocab_list.item(i)
-            items.append((item.text(), item.checkState()))
+            items.append((item.text(), item.checkState(),
+                          bool(item.data(Qt.UserRole + 1))))
 
         # 排序：已勾选的在前，未勾选的在后，同类按字母排序
         items.sort(key=lambda x: (x[1] != Qt.Checked, x[0]))
 
         # 清空列表并重新添加
         self.vocab_list.clear()
-        for text, check_state in items:
+        for text, check_state, inherited in items:
             item = QListWidgetItem(text)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(check_state)
+            if inherited:
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+                item.setData(Qt.UserRole + 1, True)
+                item.setToolTip("来自当前启用的通用预设；可加入必须词条组，但不会复制到专用词条")
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(check_state)
             self.vocab_list.addItem(item)
 
         # 重新连接信号
@@ -357,6 +620,9 @@ class PresetEditDialog(QDialog):
         else:
             name = "通用预设"
 
+        if not self.is_general and not self._validate_required_groups():
+            return
+
         # 获取选中的词条（允许为空）
         selected_affixes = []
         for i in range(self.vocab_list.count()):
@@ -366,7 +632,7 @@ class PresetEditDialog(QDialog):
 
         # 发送信号
         preset_id = self.preset_data.get("id", "") if self.preset_data else ""
-        self.preset_saved.emit(preset_id, name, selected_affixes)
+        self._emit_saved(preset_id, name, selected_affixes)
         self.accept()
 
     def get_selected_affixes(self) -> list:
@@ -394,6 +660,10 @@ class PresetEditDialog(QDialog):
         else:
             name = "通用预设"
 
+        if not self.is_general and not self._validate_required_groups():
+            event.ignore()
+            return
+
         # 获取选中的词条
         selected_affixes = self.get_selected_affixes()
 
@@ -408,5 +678,5 @@ class PresetEditDialog(QDialog):
 
         # 发送保存信号
         preset_id = self.preset_data.get("id", "") if self.preset_data else ""
-        self.preset_saved.emit(preset_id, name, selected_affixes)
+        self._emit_saved(preset_id, name, selected_affixes)
         event.accept()

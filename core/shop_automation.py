@@ -11,6 +11,8 @@ import keyboard
 from datetime import datetime
 from typing import Optional
 
+from core.relic_matcher import match_relic, log_match
+from core.relic_recorder import RelicRecorder
 from core.preset_manager import PresetManager
 from core.utils import DEBUG_ENABLED, debug_timer, affix_recorder, log_debug
 
@@ -74,6 +76,8 @@ class ShopAutomation:
         self.preset_manager = preset_manager
         self.repo_filter = repo_filter
         self.settings = settings
+        self.recorder = RelicRecorder()
+        self.stop_reason = None
 
         # 运行状态
         self.is_running = False
@@ -109,6 +113,8 @@ class ShopAutomation:
             steam_id: Steam用户ID（SL模式需要）
             backup_path: 存档备份路径（SL模式需要）
         """
+        self.stop_reason = None
+        self.repo_filter.settings = self.settings
         self.is_running = True
         self.stats = {"total_purchased": 0, "qualified": 0, "unqualified": 0, "sold": 0}
         self.qualified_relics.clear()
@@ -128,12 +134,11 @@ class ShopAutomation:
 
         # 注册按0停止的快捷键
         def on_zero_pressed():
-            self.is_running = False
+            self.stop()
             log("收到停止信号，正在停止购买...", "WARNING")
 
-        keyboard.add_hotkey('0', on_zero_pressed)
-
         try:
+            keyboard.add_hotkey('0', on_zero_pressed)
             # 刷新窗口信息
             self.repo_filter.refresh_window_info()
 
@@ -149,11 +154,13 @@ class ShopAutomation:
 
             # 1. 检测并进入商人界面
             if not self._enter_merchant_interface(log):
+                self.stop_reason = self.stop_reason or "error"
                 return
 
             # 2. 首次寻找遗物
             if not self._find_relic(log):
                 log("首次寻找遗物失败", "ERROR")
+                self.stop_reason = self.stop_reason or "error"
                 return
 
             # 3. 循环购买
@@ -163,6 +170,7 @@ class ShopAutomation:
                 if self.sl_mode_enabled and self.sl_qualified_target > 0:
                     if self.stats["qualified"] >= self.sl_qualified_target:
                         log(f"已达到目标合格遗物数量 ({self.stats['qualified']}/{self.sl_qualified_target})", "SUCCESS")
+                        self.stop_reason = "completed"
                         break
 
                     # 购买前检测暗痕，不足则执行存档恢复
@@ -171,6 +179,7 @@ class ShopAutomation:
                         log(f"暗痕不足 ({current_currency} < 10000)，合格遗物 {self.stats['qualified']}/{self.sl_qualified_target}，执行存档恢复...", "WARNING")
                         if not self._execute_sl_operation(log):
                             log("存档恢复操作失败，停止购买", "ERROR")
+                            self.stop_reason = self.stop_reason or "error"
                             break
                         # SL后重置购买统计（保留合格遗物数）
                         self.stats["total_purchased"] = 0
@@ -181,9 +190,11 @@ class ShopAutomation:
                         # 重新进入商人界面
                         if not self._enter_merchant_interface(log):
                             log("SL后无法进入商人界面", "ERROR")
+                            self.stop_reason = self.stop_reason or "error"
                             break
                         if not self._find_relic(log):
                             log("SL后无法找到遗物", "ERROR")
+                            self.stop_reason = self.stop_reason or "error"
                             break
                         first_purchase = True
                         continue
@@ -193,17 +204,20 @@ class ShopAutomation:
                         current_currency = self._detect_currency(log)
                         if current_currency >= 0 and current_currency < stop_currency:
                             log(f"暗痕不足（当前{current_currency} < 停止值{stop_currency}），停止购买", "WARNING")
+                            self.stop_reason = "completed"
                             break
 
                 # 4. 执行购买
                 if first_purchase:
                     # 首次购买：点击遗物坐标
                     if not self._execute_first_purchase(mode, version, log):
+                        self.stop_reason = self.stop_reason or "error"
                         break
                     first_purchase = False
                 else:
                     # 后续购买：直接按F购买
                     if not self._execute_subsequent_purchase(log):
+                        self.stop_reason = self.stop_reason or "error"
                         break
 
                 # 5. 处理购买的10个遗物
@@ -219,8 +233,12 @@ class ShopAutomation:
                 log("已确认操作", "INFO")
 
         except Exception as e:
+            if self.stop_reason != "perfect_relic":
+                self.stop_reason = "error"
             log(f"购买过程出错: {e}", "ERROR")
         finally:
+            if self.stop_reason is None:
+                self.stop_reason = "manual" if not self.is_running else "error"
             self.is_running = False
             try:
                 keyboard.remove_hotkey('0')
@@ -243,6 +261,8 @@ class ShopAutomation:
 
     def stop(self):
         """停止购买"""
+        if self.stop_reason is None:
+            self.stop_reason = "manual"
         self.is_running = False
 
     def _load_presets(self, mode: str):
@@ -523,7 +543,8 @@ class ShopAutomation:
             if DEBUG_ENABLED:
                 debug_timer.start(f"relic_{i+1}_ocr")
 
-            ocr_result = self.ocr_engine.recognize_with_classification_from_lines(line_images, mode)
+            ocr_result = self.ocr_engine.recognize_with_classification_from_lines(
+                line_images, mode)
 
             if DEBUG_ENABLED:
                 ocr_time = debug_timer.end(f"relic_{i+1}_ocr")
@@ -532,6 +553,8 @@ class ShopAutomation:
                 # 从OCR结果中提取细粒度的时间数据（如果有的话）
                 # 这些时间已经在OCR引擎中记录过了
 
+            if not self.is_running:
+                return
             if not ocr_result["success"]:
                 log("OCR识别失败，跳过", "ERROR")
                 pydirectinput.press('right')
@@ -559,7 +582,7 @@ class ShopAutomation:
             if DEBUG_ENABLED:
                 debug_timer.start(f"relic_{i+1}_match")
 
-            is_qualified = self._match_affixes(
+            match_result = self._match_affixes(
                 ocr_result, general_preset, dedicated_presets,
                 blacklist_preset, require_double
             )
@@ -568,8 +591,11 @@ class ShopAutomation:
                 match_time = debug_timer.end(f"relic_{i+1}_match")
                 debug_timer.record(f"第{i+1}个遗物-词条匹配", match_time)
 
+            if not self.is_running:
+                break
+
             # 4. 执行操作
-            if is_qualified:
+            if match_result.qualified:
                 self.stats["qualified"] += 1
                 log(f"合格遗物，保留", "SUCCESS")
 
@@ -579,8 +605,25 @@ class ShopAutomation:
                     "affixes": ocr_result["affixes"]
                 }
                 self.qualified_relics.append(relic_info)
+                try:
+                    if not self.recorder.record("shop", mode, relic_info["index"], ocr_result, match_result):
+                        log(f"匹配记录写入失败，仍保留遗物: {self.recorder.last_error}", "WARNING")
+                except Exception as exc:
+                    log(f"匹配记录写入失败，仍保留遗物: {exc}", "WARNING")
+                log_match(match_result, relic_info["index"], log)
+                if match_result.perfect and self.settings.get("shop_stop_on_perfect_relic", False):
+                    self.stop_reason = "perfect_relic"
+                    self.is_running = False
+                    if stats_callback:
+                        stats_callback(self.stats.copy())
+                    return
+                if not self.is_running:
+                    return
 
                 # 按右方向键跳过（保留）
+                pydirectinput.press('right')
+            elif not match_result.destructive_action_allowed:
+                log_match(match_result, self.stats["total_purchased"] - 10 + i + 1, log)
                 pydirectinput.press('right')
             else:
                 self.stats["unqualified"] += 1
@@ -599,48 +642,9 @@ class ShopAutomation:
             debug_timer.record("处理10个遗物总耗时", total_time)
 
     def _match_affixes(self, ocr_result, general_preset, dedicated_presets,
-                       blacklist_preset, require_double) -> bool:
-        """
-        词条匹配（与仓库清理逻辑一致）
-        """
-        pos_affixes = [a for a in ocr_result["affixes"] if a["is_positive"]]
-        neg_affixes = [a for a in ocr_result["affixes"] if not a["is_positive"]]
-
-        # 单个正面词条 → 不合格
-        if len(pos_affixes) <= 1:
-            return False
-
-        # 黑名单匹配（深夜模式）
-        if blacklist_preset and blacklist_preset.get("is_active", True):
-            blacklist_set = set(blacklist_preset.get("affixes", []))
-            for neg in neg_affixes:
-                if neg["cleaned_text"] in blacklist_set:
-                    return False
-
-        # 白名单匹配
-        required_matches = 2 if require_double else 3
-
-        general_vocabs = set()
-        if general_preset and general_preset.get("is_active", True):
-            general_vocabs = set(general_preset.get("affixes", []))
-
-        # 通用 + 每个专用预设
-        if dedicated_presets:
-            for preset in dedicated_presets.values() if isinstance(dedicated_presets, dict) else dedicated_presets:
-                if not preset.get("is_active", True):
-                    continue
-                combined_vocabs = general_vocabs | set(preset.get("affixes", []))
-                count = sum(1 for a in pos_affixes if a["cleaned_text"] in combined_vocabs)
-                if count >= required_matches:
-                    return True
-
-        # 只检查通用预设
-        if general_vocabs:
-            count = sum(1 for a in pos_affixes if a["cleaned_text"] in general_vocabs)
-            if count >= required_matches:
-                return True
-
-        return False
+                       blacklist_preset, require_double):
+        return match_relic(ocr_result, general_preset, dedicated_presets, blacklist_preset,
+                           threshold=2 if require_double else 3, general_fallback="always")
 
 
     def _execute_sl_operation(self, log) -> bool:
@@ -650,6 +654,9 @@ class ShopAutomation:
         Returns:
             True=成功，False=失败
         """
+        if self.stop_reason == "perfect_relic" or not self.is_running:
+            return False
+
         if not self.save_manager or not self.steam_id or not self.backup_path:
             log("存档恢复参数缺失", "ERROR")
             return False

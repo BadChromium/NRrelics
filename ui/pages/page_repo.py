@@ -137,13 +137,36 @@ class PresetCard(CardWidget):
     delete_clicked = Signal(str)  # preset_id
     toggle_clicked = Signal(str)  # preset_id
 
-    def __init__(self, preset_data: dict, is_general: bool = False, parent=None):
+    def __init__(self, preset_data: dict, is_general: bool = False, parent=None,
+                 inherited_affixes=None):
         super().__init__(parent)
         self.preset_data = preset_data
         self.is_general = is_general
+        self.inherited_affixes = set(inherited_affixes or [])
         self.is_expanded = False
 
         self._init_ui()
+
+    def _required_groups(self):
+        from core.relic_matcher import _required_groups
+        groups, _, valid = _required_groups(self.preset_data)
+        if not valid:
+            return ["无效必须词条组，请编辑修正"]
+        return [
+            [member + "（通用）" if member in self.inherited_affixes else member
+             for member in group]
+            for group in groups
+        ]
+
+    @staticmethod
+    def _group_summary(groups):
+        rendered = []
+        for group in groups:
+            if isinstance(group, list):
+                rendered.append("(" + " 或 ".join(str(member) for member in group) + ")")
+            else:
+                rendered.append("(" + str(group) + ")")
+        return "；".join(rendered)
 
     def _init_ui(self):
         """初始化UI"""
@@ -169,10 +192,13 @@ class PresetCard(CardWidget):
         info_layout.setSpacing(2)
 
         # 名称
-        name_label = QLabel(self.preset_data["name"])
+        groups = self._required_groups()
+        name_label = QLabel(("★ " if groups else "")
+                            + self.preset_data["name"])
         name_font = QFont("", 10)  # 指定字号避免-1错误
         name_font.setBold(True)
         name_label.setFont(name_font)
+        name_label.setTextFormat(Qt.PlainText)
         info_layout.addWidget(name_label)
 
         # 词条数量
@@ -180,6 +206,13 @@ class PresetCard(CardWidget):
         self._count_label.setStyleSheet("color: #888; font-size: 10pt;")
         self._theme_labels.append(self._count_label)
         info_layout.addWidget(self._count_label)
+        if groups:
+            summary = "必须：" + self._group_summary(groups)
+            self._requirements_label = QLabel(summary)
+            self._requirements_label.setWordWrap(True)
+            self._requirements_label.setTextFormat(Qt.PlainText)
+            self._requirements_label.setStyleSheet("color: #b06a00; font-size: 9pt;")
+            info_layout.addWidget(self._requirements_label)
 
         top_layout.addLayout(info_layout)
         top_layout.addStretch()
@@ -217,8 +250,19 @@ class PresetCard(CardWidget):
 
         # 添加词条标签
         self._affix_labels = []
-        for affix in self.preset_data["affixes"][:20]:  # 最多显示20条
-            affix_label = QLabel(f"• {affix}")
+        groups = self._required_groups()
+        group_by_affix = {}
+        for index, group in enumerate(groups, 1):
+            if isinstance(group, list):
+                for affix in group:
+                    if isinstance(affix, str):
+                        group_by_affix.setdefault(affix, []).append(index)
+        for affix in self.preset_data["affixes"][:20]:
+            marker = (
+                " ★" + "、".join(f"组{index}" for index in group_by_affix[affix])
+                if affix in group_by_affix else ""
+            )
+            affix_label = QLabel(f"• {affix}{marker}")
             affix_label.setFont(QFont("Segoe UI", 9))
             affix_label.setStyleSheet("color: #555;")
             affix_label.setWordWrap(True)
@@ -233,6 +277,18 @@ class PresetCard(CardWidget):
             self._more_label.setStyleSheet("color: #999; font-style: italic;")
             self._theme_labels.append(self._more_label)
             affixes_layout.addWidget(self._more_label)
+        for affix in self.preset_data["affixes"][20:]:
+            if affix in group_by_affix:
+                marker = " ★" + "、".join(
+                    f"组{index}" for index in group_by_affix[affix]
+                )
+                label = QLabel(f"• {affix}{marker}")
+                label.setFont(QFont("Segoe UI", 9))
+                label.setStyleSheet("color: #555;")
+                label.setWordWrap(True)
+                self._affix_labels.append(label)
+                self._theme_labels.append(label)
+                affixes_layout.addWidget(label)
 
         self.affixes_widget.setVisible(False)
         main_layout.addWidget(self.affixes_widget)
@@ -590,7 +646,11 @@ class RepoPage(QWidget):
             drag_drop_container.reorder_requested.connect(self._handle_preset_reorder)
 
             for preset in dedicated_presets.values():
-                card = PresetCard(preset, is_general=False)
+                card = PresetCard(
+                    preset, is_general=False,
+                    inherited_affixes=general_preset.get("affixes", [])
+                    if general_preset and general_preset.get("is_active", True) else []
+                )
                 card.edit_clicked.connect(self._edit_dedicated_preset)
                 card.delete_clicked.connect(self._delete_preset)
                 card.toggle_clicked.connect(self._toggle_preset)
@@ -694,14 +754,22 @@ class RepoPage(QWidget):
             for_editing=True  # 编辑模式：只加载常规词条
         )
 
-        dialog = PresetEditDialog(vocab, parent=self)
-        dialog.preset_saved.connect(lambda pid, name, affixes: self._save_new_preset(mode, name, affixes))
+        general = self.preset_manager.get_general_preset(mode)
+        dialog = PresetEditDialog(
+                                  vocab, parent=self, mode=mode,
+                                  inherited_vocabulary=general.get("affixes", [])
+                                  if general and general.get("is_active", True) else [],
+                                  exception_vocabulary=self.preset_manager.load_vocabulary("deepnight_blacklist")
+                                  if mode == "deepnight" else [])
+        dialog.grouped_saved.connect(lambda pid, name, affixes, groups, exceptions: self._save_new_preset(mode, name, affixes, groups, exceptions))
         dialog.exec()
 
-    def _save_new_preset(self, mode: str, name: str, affixes: list):
+    def _save_new_preset(self, mode: str, name: str, affixes: list, groups=None, exceptions=None):
         """保存新预设"""
         try:
-            self.preset_manager.create_dedicated_preset(mode, name, affixes)
+            self.preset_manager.create_dedicated_preset(mode, name, affixes,
+                                                        blacklist_exceptions=exceptions,
+                                                        required_affix_groups=groups)
             self._refresh_presets()
             self.presets_modified.emit()  # 发出预设修改信号
             InfoBar.success("创建成功", f"预设 '{name}' 已创建", parent=self)
@@ -724,13 +792,26 @@ class RepoPage(QWidget):
             for_editing=True  # 编辑模式：只加载常规词条
         )
 
-        dialog = PresetEditDialog(vocab, preset, parent=self)
-        dialog.preset_saved.connect(lambda pid, name, affixes: self._update_preset(mode, preset_id, name, affixes))
+        general = self.preset_manager.get_general_preset(mode)
+        dialog = PresetEditDialog(
+                                  vocab, preset, parent=self, mode=mode,
+                                  inherited_vocabulary=general.get("affixes", [])
+                                  if general and general.get("is_active", True) else [],
+                                  exception_vocabulary=self.preset_manager.load_vocabulary("deepnight_blacklist")
+                                  if mode == "deepnight" else [])
+        dialog.grouped_saved.connect(lambda pid, name, affixes, groups, exceptions: self._update_preset(mode, preset_id, name, affixes, groups, exceptions))
         dialog.exec()
 
-    def _update_preset(self, mode: str, preset_id: str, name: str, affixes: list):
+    def _update_preset(self, mode: str, preset_id: str, name: str, affixes: list, groups=None, exceptions=None):
         """更新预设"""
-        self.preset_manager.update_dedicated_preset(mode, preset_id, name, affixes)
+        try:
+            self.preset_manager.update_dedicated_preset(
+                mode, preset_id, name, affixes,
+                blacklist_exceptions=exceptions,
+                required_affix_groups=groups)
+        except ValueError as e:
+            MessageBox("错误", f"保存预设失败: {e}", self).exec()
+            return
         self._refresh_presets()
         self.presets_modified.emit()  # 发出预设修改信号
         InfoBar.success("保存成功", f"预设 '{name}' 已更新", parent=self)
@@ -856,18 +937,15 @@ class RepoPage(QWidget):
         """清理完成"""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-
-        if self.is_manual_stop:
-            if self.log_manager:
-                self.log_manager.log("清理已停止", "WARNING")
-            else:
-                self.logger.log("清理已停止", "WARNING")
-            self.is_manual_stop = False
-        else:
-            if self.log_manager:
-                self.log_manager.log("清理已完成", "SUCCESS")
-            else:
-                self.logger.log("清理已完成", "SUCCESS")
+        reason = self.repo_cleaner.stop_reason
+        messages = {
+            "perfect_relic": ("发现完美遗物，已保留并停止清理", "SUCCESS"),
+            "manual": ("清理已手动停止", "WARNING"),
+            "completed": ("清理已完成", "SUCCESS"),
+            "error": ("清理异常停止，请检查日志", "ERROR"),
+        }
+        self._on_log(*messages.get(reason, messages["error"]))
+        self.is_manual_stop = False
 
         # 更新统计
         stats = self.repo_cleaner.stats

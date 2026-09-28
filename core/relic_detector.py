@@ -12,6 +12,7 @@ from core.utils import get_resource_path, log_debug
 
 
 # 遗物状态常量
+RELIC_STATE_UNKNOWN = "Unknown"
 RELIC_STATE_LIGHT = "Light" #亮度高 自由出售
 RELIC_STATE_DARK_FE = "FE"  #已装备且已收藏
 RELIC_STATE_DARK_F = "F"    #仅已收藏
@@ -162,16 +163,21 @@ class RelicDetector:
         Returns:
             遗物状态: "Light", "FE", "F", "E", "O"
         """
-        cursor_box, cursor_width = self.detect_cursor(image, scale_x, scale_y)
-
-        if cursor_box is None:
-            return RELIC_STATE_LIGHT  # 默认返回Light
-
-        # 使用光标宽度计算缩放因子
-        scale_factor = cursor_width / 92.0 if cursor_width else 1.0
-
-        # 检测详细状态
-        result = self._detect_detailed_state(image, cursor_box, scale_factor)
+        try:
+            if image is None or image.size == 0:
+                return RELIC_STATE_UNKNOWN
+            cursor_box, cursor_width = self.detect_cursor(image, scale_x, scale_y)
+            if cursor_box is None or not cursor_width:
+                return RELIC_STATE_UNKNOWN
+            if self.template_cup is None or self.template_bookmark is None:
+                return RELIC_STATE_UNKNOWN
+            scale_factor = cursor_width / 92.0
+            result = self._detect_detailed_state(image, cursor_box, scale_factor)
+            if result.get('state') not in ('Light', 'Dark'):
+                return RELIC_STATE_UNKNOWN
+        except Exception as exc:
+            log_debug(f"[警告] 遗物状态检测失败: {exc}")
+            return RELIC_STATE_UNKNOWN
 
         # 判断状态
         is_equipped = result['equipped']
@@ -213,6 +219,10 @@ class RelicDetector:
         is_equipped, score_cup = self._match_icon(cup_zone, self.template_cup, scale_factor)
         is_favorited, score_mark = self._match_icon(mark_zone, self.template_bookmark, scale_factor)
 
+        if is_equipped is None or is_favorited is None:
+            return {'state': RELIC_STATE_UNKNOWN, 'equipped': is_equipped,
+                    'favorited': is_favorited, 'brightness': 0}
+
         # 2. 亮度计算
         center_ratio = self.brightness_center_ratio
         offset_ratio = (1.0 - center_ratio) / 2.0
@@ -245,16 +255,22 @@ class RelicDetector:
             'brightness': brightness
         }
 
-    def _match_icon(self, search_img: np.ndarray, template: np.ndarray, scale: float) -> Tuple[bool, float]:
-        """匹配图标"""
-        if template is None or search_img.size == 0:
-            return False, 0.0
+    def _match_icon(self, search_img: np.ndarray, template: np.ndarray, scale: float) -> Tuple[Optional[bool], float]:
+        """Match an icon; None means unavailable, False means a completed negative."""
+        if (template is None or template.size == 0 or template.ndim != 2
+                or search_img is None or search_img.size == 0 or search_img.ndim != 3
+                or search_img.shape[2] != 3 or not np.isfinite(scale) or scale <= 0):
+            return None, 0.0
 
         h, w = template.shape[:2]
-        new_w, new_h = int(w * scale), int(h * scale)
+        scaled_w, scaled_h = w * scale, h * scale
+        if not np.isfinite(scaled_w) or not np.isfinite(scaled_h):
+            return None, 0.0
+        new_w, new_h = int(scaled_w), int(scaled_h)
 
-        if new_w > search_img.shape[1] or new_h > search_img.shape[0] or new_w < 1:
-            return False, 0.0
+        if (new_w > search_img.shape[1] or new_h > search_img.shape[0]
+                or new_w < 1 or new_h < 1):
+            return None, 0.0
 
         scaled_tpl = cv2.resize(template, (new_w, new_h))
         search_gray = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)

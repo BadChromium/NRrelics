@@ -202,7 +202,9 @@ class PresetManager:
         presets = self.get_dedicated_presets(mode)
         return [p for p in presets.values() if p.get("is_active", True)]
 
-    def create_dedicated_preset(self, mode: str, name: str, affixes: List[str]) -> str:
+    def create_dedicated_preset(self, mode: str, name: str, affixes: List[str],
+                                required_affixes=None, blacklist_exceptions=None,
+                                required_affix_groups=None) -> str:
         """
         创建专用预设
 
@@ -214,6 +216,17 @@ class PresetManager:
         if len(presets) >= 20:
             raise ValueError("专用预设数量已达上限（20个）")
 
+        grouped_supplied = required_affix_groups is not None
+        if required_affix_groups is None:
+            required_affixes = list(required_affixes or [])
+            required_affix_groups = [[a] for a in required_affixes]
+        else:
+            required_affix_groups = self._validate_required_groups(required_affix_groups)
+            required_affixes = [a for group in required_affix_groups for a in group]
+        allowed_affixes = set(affixes) | self._active_general_affixes(mode)
+        if not set(required_affixes) <= allowed_affixes:
+            raise ValueError("必须词条必须属于有效词条")
+        blacklist_exceptions = list(blacklist_exceptions or []) if mode == "deepnight" else []
         # 创建预设
         preset_id = str(uuid.uuid4())
         preset_type = PRESET_TYPE_NORMAL_WHITELIST if mode == "normal" else PRESET_TYPE_DEEPNIGHT_WHITELIST
@@ -222,10 +235,14 @@ class PresetManager:
             "id": preset_id,
             "name": name,
             "type": preset_type,
-            "affixes": affixes,
+            "affixes": list(affixes),
+            "required_affixes": required_affixes,
+            "blacklist_exceptions": blacklist_exceptions,
             "is_general": False,
             "is_active": True
         }
+        if grouped_supplied:
+            preset["required_affix_groups"] = required_affix_groups
 
         if mode == "normal":
             self.normal_dedicated[preset_id] = preset
@@ -235,19 +252,66 @@ class PresetManager:
         self.save_presets()
         return preset_id
 
-    def update_dedicated_preset(self, mode: str, preset_id: str, name: str = None, affixes: List[str] = None):
+    def update_dedicated_preset(self, mode: str, preset_id: str, name: str = None, affixes: List[str] = None,
+                                required_affixes=None, blacklist_exceptions=None,
+                                required_affix_groups=None):
         """更新专用预设"""
         presets = self.get_dedicated_presets(mode)
 
         if preset_id not in presets:
             raise ValueError(f"预设不存在: {preset_id}")
 
+        preset = presets[preset_id]
+        useful = list(affixes) if affixes is not None else preset["affixes"]
+        grouped_existing = "required_affix_groups" in preset
+        if required_affix_groups is not None:
+            groups = self._validate_required_groups(required_affix_groups)
+            required = [a for group in groups for a in group]
+        elif required_affixes is not None:
+            required = list(required_affixes)
+            groups = [[a] for a in required]
+        elif grouped_existing:
+            groups = self._validate_required_groups(preset.get("required_affix_groups"))
+            required = [a for group in groups for a in group]
+        else:
+            required = (list(preset.get("required_affixes", [])) if affixes is None else
+                        [a for a in preset.get("required_affixes", []) if a in useful])
+            groups = [[a] for a in required]
+        allowed_affixes = set(useful) | self._active_general_affixes(mode)
+        if (required_affix_groups is not None or required_affixes is not None or
+                affixes is not None) and not set(required) <= allowed_affixes:
+            raise ValueError("必须词条必须属于有效词条")
         if name is not None:
-            presets[preset_id]["name"] = name
-        if affixes is not None:
-            presets[preset_id]["affixes"] = affixes
+            preset["name"] = name
+        preset["affixes"] = useful
+        preset["required_affixes"] = required
+        if (required_affix_groups is not None or grouped_existing or
+                "required_affix_groups" in preset):
+            preset["required_affix_groups"] = groups
+        if blacklist_exceptions is not None:
+            preset["blacklist_exceptions"] = list(blacklist_exceptions) if mode == "deepnight" else []
 
         self.save_presets()
+
+    @staticmethod
+    def _validate_required_groups(groups):
+        if not isinstance(groups, list):
+            raise ValueError("必须词条组格式无效")
+        result = []
+        for group in groups:
+            if not isinstance(group, list) or not group:
+                raise ValueError("必须词条组不能为空")
+            if not all(isinstance(entry, str) and entry for entry in group):
+                raise ValueError("必须词条组包含无效词条")
+            result.append(list(dict.fromkeys(group)))
+        return result
+
+    def _active_general_affixes(self, mode: str) -> set:
+        general = self.get_general_preset(mode)
+        if not general or not general.get("is_active", True):
+            return set()
+        affixes = general.get("affixes", [])
+        return set(affixes) if isinstance(affixes, list) else set()
 
     def delete_dedicated_preset(self, mode: str, preset_id: str):
         """删除专用预设"""

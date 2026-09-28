@@ -176,6 +176,18 @@ class SettingsPage(QWidget):
         card_layout.addLayout(valid_layout)
         card_layout.addWidget(valid_desc)
 
+        perfect_layout = QHBoxLayout()
+        perfect_layout.addWidget(QLabel("发现完美遗物时停止"))
+        self.stop_on_perfect_switch = SwitchButton()
+        self.stop_on_perfect_switch.setChecked(self.settings.get("stop_on_perfect_relic", False))
+        self.stop_on_perfect_switch.checkedChanged.connect(self._auto_save_settings)
+        perfect_layout.addWidget(self.stop_on_perfect_switch)
+        perfect_layout.addStretch()
+        card_layout.addLayout(perfect_layout)
+        perfect_desc = QLabel("当检测到至少3条有效词条且满足专用预设要求的遗物时自动停止")
+        perfect_desc.setWordWrap(True)
+        card_layout.addWidget(perfect_desc)
+
         return card
 
     def _create_shop_settings(self) -> CardWidget:
@@ -207,6 +219,18 @@ class SettingsPage(QWidget):
         shop_valid_desc.setStyleSheet("color: gray;")
         card_layout.addLayout(shop_valid_layout)
         card_layout.addWidget(shop_valid_desc)
+
+        perfect_layout = QHBoxLayout()
+        perfect_layout.addWidget(QLabel("发现完美遗物时停止"))
+        self.shop_stop_on_perfect_switch = SwitchButton()
+        self.shop_stop_on_perfect_switch.setChecked(self.settings.get("shop_stop_on_perfect_relic", False))
+        self.shop_stop_on_perfect_switch.checkedChanged.connect(self._auto_save_settings)
+        perfect_layout.addWidget(self.shop_stop_on_perfect_switch)
+        perfect_layout.addStretch()
+        card_layout.addLayout(perfect_layout)
+        perfect_desc = QLabel("当检测到至少3条有效词条且满足专用预设要求的遗物时自动停止")
+        perfect_desc.setWordWrap(True)
+        card_layout.addWidget(perfect_desc)
 
         return card
 
@@ -494,6 +518,8 @@ class SettingsPage(QWidget):
             "allow_operate_favorited": False,
             "require_double_valid": True,
             "shop_require_double_valid": True,
+            "stop_on_perfect_relic": False,
+            "shop_stop_on_perfect_relic": False,
             "steam_path": r"C:\Program Files (x86)\Steam",
             "ocr_debug": False,
             "template_threshold": 0.7,
@@ -510,6 +536,8 @@ class SettingsPage(QWidget):
             "allow_operate_favorited": self.allow_favorited_switch.isChecked(),
             "require_double_valid": not self.require_double_switch.isChecked(),
             "shop_require_double_valid": not self.shop_require_double_switch.isChecked(),
+            "stop_on_perfect_relic": self.stop_on_perfect_switch.isChecked(),
+            "shop_stop_on_perfect_relic": self.shop_stop_on_perfect_switch.isChecked(),
             "steam_path": self.steam_path_input.text(),
             "ocr_debug": self.ocr_debug_switch.isChecked() if hasattr(self, 'ocr_debug_switch') else self.settings.get("ocr_debug", False),
             "template_threshold": self._get_threshold_value(),
