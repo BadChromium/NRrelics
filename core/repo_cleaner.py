@@ -344,6 +344,12 @@ class RepoCleaner:
                             self.pending_sell_relics = []
                         self.pending_sell_relics.append(pending_relic_info)
 
+                        # F 仅标记待售出。先观察光标，未移动时才按一次右键；
+                        # 在任何后续遗物识别前确认确实进入了下一格。
+                        if (max_relics <= 0 or self.stats["total_detected"] < max_relics):
+                            if not self._advance_after_sale_selection(cursor_box, log):
+                                break
+
                 # 移动到下一遗物（如果需要）
                 if need_move_right and self.is_running:
                     pydirectinput.press('right')
@@ -482,6 +488,44 @@ class RepoCleaner:
         # Ignore small edge jitter; require a substantial card-size movement.
         return abs(x - px) >= max(pw, w) * 0.6 or abs(y - py) >= max(ph, h) * 0.6
 
+    def _advance_after_sale_selection(self, previous_cursor, log) -> bool:
+        """Move once after F if needed, and verify before inspecting another relic."""
+        for _ in range(2):
+            if not self.is_running:
+                return False
+            time.sleep(0.15)
+            image = self.repository_filter._capture_game_window()
+            if image is None:
+                break
+            current, _ = self.relic_detector.detect_cursor(
+                image, self.repository_filter.scale_x, self.repository_filter.scale_y)
+            if self._cursor_advanced(previous_cursor, current):
+                return True
+
+        if image is None or current is None:
+            log("标记售出后无法识别光标，安全停止；未确认售出", "WARNING")
+            self.stop_reason = "error"
+            return False
+
+        if not self.is_running:
+            return False
+        log("标记售出后光标仍在原位，按右键前往下一遗物", "INFO")
+        pydirectinput.press('right')
+        for _ in range(2):
+            if not self.is_running:
+                return False
+            time.sleep(0.15)
+            image = self.repository_filter._capture_game_window()
+            if image is not None:
+                current, _ = self.relic_detector.detect_cursor(
+                    image, self.repository_filter.scale_x, self.repository_filter.scale_y)
+                if self._cursor_advanced(previous_cursor, current):
+                    return True
+
+        log("按右键后仍无法确认光标已移动，安全停止；未确认售出", "WARNING")
+        self.stop_reason = "error"
+        return False
+
     def _record_match(self, mode, observation, result, log):
         try:
             if not self.recorder.record("repository", mode, self.stats["total_detected"], observation, result):
@@ -516,7 +560,7 @@ class RepoCleaner:
                     pydirectinput.press('f')
                     self.stats["sold"] += 1
                     self.pending_sell_count += 1
-                    return False  # 按f后会自动跳转，不需要按右方向键
+                    return False  # 外层会检查 F 后的光标位置，并在必要时按右键
                 elif relic_state == RELIC_STATE_DARK_F:
                     log("取消收藏后标记售出", "INFO")
                     pydirectinput.press('2')  # 取消收藏
@@ -526,7 +570,7 @@ class RepoCleaner:
                     pydirectinput.press('f')  # 标记售出
                     self.stats["sold"] += 1
                     self.pending_sell_count += 1
-                    return False  # 按f后会自动跳转，不需要按右方向键
+                    return False  # 外层会检查 F 后的光标位置，并在必要时按右键
 
         elif cleaning_mode == "favorite":
             if is_qualified:
