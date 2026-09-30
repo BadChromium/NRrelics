@@ -939,7 +939,6 @@ class RepoPage(QWidget):
         self.stop_btn.setEnabled(False)
         reason = self.repo_cleaner.stop_reason
         messages = {
-            "perfect_relic": ("发现完美遗物，已保留并停止清理", "SUCCESS"),
             "manual": ("清理已手动停止", "WARNING"),
             "completed": ("清理已完成", "SUCCESS"),
             "error": ("清理异常停止，请检查日志", "ERROR"),

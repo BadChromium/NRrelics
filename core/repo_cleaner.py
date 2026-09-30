@@ -285,10 +285,6 @@ class RepoCleaner:
                                                 "affixes": ocr_result["affixes"], "match": match_result})
                     self._record_match(mode, ocr_result, match_result, log)
                     log_match(match_result, self.stats["total_detected"], log)
-                    if match_result.perfect and self.settings.get("stop_on_perfect_relic", False):
-                        self.stop_reason = "perfect_relic"
-                        self.is_running = False
-                        break
                 else:
                     log_match(match_result, self.stats["total_detected"], log)
                     self.stats["unqualified"] += 1
@@ -380,7 +376,7 @@ class RepoCleaner:
 
     def stop_cleaning(self):
         """停止清理"""
-        if self.is_running and self.stop_reason != "perfect_relic":
+        if self.is_running:
             self.stop_reason = "manual"
         self.is_running = False
 
