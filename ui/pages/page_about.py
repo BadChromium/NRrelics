@@ -1,7 +1,6 @@
 """关于页面"""
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea
-from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 from qfluentwidgets import CardWidget
 
@@ -9,21 +8,9 @@ from qfluentwidgets import CardWidget
 class AboutPage(QWidget):
     """关于页面"""
 
-    # 开发者模式信号
-    developer_mode_activated = Signal()
-
     def __init__(self):
         super().__init__()
         self.setObjectName("AboutPage")
-        self.click_count = 0
-        self._developer_mode = False
-
-        # 点击超时重置计时器（2秒内未继续点击则重置）
-        self._click_timer = QTimer()
-        self._click_timer.setSingleShot(True)
-        self._click_timer.setInterval(2000)
-        self._click_timer.timeout.connect(self._reset_click_count)
-
         self._init_ui()
 
     def _init_ui(self):
@@ -64,9 +51,8 @@ class AboutPage(QWidget):
 
         layout.addWidget(info_card)
 
-        # 版本号卡片（彩蛋入口）
+        # 版本号卡片
         version_card = CardWidget()
-        version_card.setCursor(Qt.PointingHandCursor)
         version_layout = QVBoxLayout(version_card)
         version_layout.setContentsMargins(24, 20, 24, 20)
         version_layout.setSpacing(8)
@@ -80,7 +66,6 @@ class AboutPage(QWidget):
         self.version_label.setStyleSheet("color: gray;")
         version_layout.addWidget(self.version_label)
 
-        version_card.mousePressEvent = self._on_version_clicked
         layout.addWidget(version_card)
 
         # GitHub 卡片
@@ -130,21 +115,3 @@ class AboutPage(QWidget):
 
         layout.addStretch()
         scroll_area.setWidget(scroll_content)
-
-    def _on_version_clicked(self, event):
-        """版本号点击事件（彩蛋）"""
-        if self._developer_mode:
-            return
-
-        self.click_count += 1
-        self._click_timer.start()
-
-        if self.click_count >= 5:
-            self.click_count = 0
-            self._developer_mode = True
-            self._click_timer.stop()
-            self.developer_mode_activated.emit()
-
-    def _reset_click_count(self):
-        """超时重置点击计数"""
-        self.click_count = 0

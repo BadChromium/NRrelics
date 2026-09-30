@@ -2,8 +2,8 @@
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QLineEdit, QInputDialog, QMessageBox, QScrollArea,
-                               QDialog, QDialogButtonBox)
-from PySide6.QtCore import Qt
+                               QDialog, QDialogButtonBox, QFileDialog)
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from qfluentwidgets import (CardWidget, ComboBox, PrimaryPushButton, PushButton,
                            InfoBar, InfoBarPosition, LineEdit as FluentLineEdit,
@@ -17,6 +17,8 @@ from core.utils import get_user_data_path
 
 class SavePage(QWidget):
     """存档管理页面"""
+
+    steam_path_selected = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -92,12 +94,24 @@ class SavePage(QWidget):
         user_layout.addStretch()
         card_layout.addLayout(user_layout)
 
-        # Steam路径提示
-        steam_status = "已检测" if self.save_manager.steam_path else "未检测到，请在设置中配置"
-        self.steam_status_label = QLabel(f"Steam路径: {self.save_manager.steam_path or steam_status}")
+        # Steam 路径与修改入口
+        steam_path_layout = QHBoxLayout()
+        self.steam_status_label = QLabel(
+            f"Steam路径: {self.save_manager.steam_path or '未检测到，请修改路径或自动检测'}")
         self.steam_status_label.setFont(QFont("Segoe UI", 8))
+        self.steam_status_label.setWordWrap(True)
+        self.steam_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._update_steam_status_style()
-        card_layout.addWidget(self.steam_status_label)
+        steam_path_layout.addWidget(self.steam_status_label, 1)
+
+        self.steam_browse_btn = PushButton("浏览修改")
+        self.steam_browse_btn.clicked.connect(self._browse_steam_path)
+        steam_path_layout.addWidget(self.steam_browse_btn)
+
+        self.steam_detect_btn = PushButton("自动检测")
+        self.steam_detect_btn.clicked.connect(self._auto_detect_steam_path)
+        steam_path_layout.addWidget(self.steam_detect_btn)
+        card_layout.addLayout(steam_path_layout)
 
         return card
 
@@ -497,9 +511,46 @@ class SavePage(QWidget):
         """外部更新Steam路径"""
         self.save_manager.set_steam_path(steam_path)
         self._populate_user_combo()
-        self.steam_status_label.setText(f"Steam路径: {self.save_manager.steam_path or '未检测到'}")
+        self.steam_status_label.setText(
+            f"Steam路径: {self.save_manager.steam_path or '未检测到，请修改路径或自动检测'}")
         self._update_steam_status_style()
         self._refresh_all()
+
+    def _select_steam_path(self, steam_path: str):
+        """由存档页选择路径，并同步到设置页持久化。"""
+        self.update_steam_path(steam_path)
+        self.steam_path_selected.emit(self.save_manager.steam_path)
+
+    def _browse_steam_path(self):
+        """浏览并验证 Steam 安装目录。"""
+        initial_path = self.save_manager.steam_path or os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(self, "选择Steam安装目录", initial_path)
+        if not path:
+            return
+        if not SaveManager.is_valid_steam_path(path):
+            InfoBar.error(
+                title="路径无效",
+                content="请选择包含 steam.exe 或 config/loginusers.vdf 的 Steam 安装目录",
+                orient=Qt.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=4000, parent=self)
+            return
+        self._select_steam_path(path)
+
+    def _auto_detect_steam_path(self):
+        """重新扫描注册表和所有盘符，覆盖旧路径。"""
+        path = SaveManager.detect_steam_path()
+        if not path:
+            InfoBar.warning(
+                title="未找到 Steam",
+                content="请点击“浏览修改”选择 Steam 安装目录",
+                orient=Qt.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP, duration=4000, parent=self)
+            return
+        self._select_steam_path(path)
+        InfoBar.success(
+            title="检测成功", content=f"Steam安装目录: {path}",
+            orient=Qt.Horizontal, isClosable=True,
+            position=InfoBarPosition.TOP, duration=3000, parent=self)
 
     def _update_steam_status_style(self):
         """根据当前主题更新Steam状态标签颜色"""

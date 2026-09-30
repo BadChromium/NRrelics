@@ -9,6 +9,7 @@ import pygetwindow as gw
 import win32gui
 import win32con
 import os
+from PIL import ImageGrab
 from typing import Tuple, Optional
 from datetime import datetime
 from core.utils import log_debug
@@ -158,6 +159,24 @@ class RepositoryFilter:
 
         return scale_x, scale_y
 
+    def validate_game_resolution(self, log) -> bool:
+        """Check the game client area's real size before automated input."""
+        self.refresh_window_info()
+        client_rect = self._get_client_rect_screen_coords()
+        if client_rect is None or client_rect[2] <= 0 or client_rect[3] <= 0:
+            log("无法读取游戏窗口的实际分辨率，已停止。请确认游戏窗口可见。", "ERROR")
+            return False
+
+        _, _, width, height = client_rect
+        # Tolerate one pixel of rounding in the reported client height.
+        if abs(width * 9 - height * 16) > 16:
+            log(f"游戏实际分辨率为 {width}x{height}，不是 16:9，已停止。"
+                "建议设为 1920x1080 或 1280x720 窗口化。", "ERROR")
+            return False
+
+        log(f"游戏实际分辨率：{width}x{height}（16:9）", "INFO")
+        return True
+
     def _scale_region(self, region: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
         """根据缩放因子调整区域坐标（分别使用X和Y缩放因子）"""
         x1, y1, x2, y2 = region
@@ -210,26 +229,19 @@ class RepositoryFilter:
             BGR格式的numpy数组，如果失败则返回None
         """
         try:
-            if self.game_window:
-                # 尝试获取客户区坐标
-                client_coords = self._get_client_rect_screen_coords()
-
-                if client_coords:
-                    # 使用客户区坐标截图
-                    left, top, width, height = client_coords
-                    screenshot = pyautogui.screenshot(region=(left, top, width, height))
-                else:
-                    # 回退到使用整个窗口（包括边框）
-                    log_debug("[警告] 无法获取客户区，使用整个窗口截图")
-                    screenshot = pyautogui.screenshot(region=(
-                        self.game_window.left,
-                        self.game_window.top,
-                        self.game_window.width,
-                        self.game_window.height
-                    ))
-            else:
-                # 回退到全屏截图
-                screenshot = pyautogui.screenshot()
+            client_coords = self._get_client_rect_screen_coords()
+            if not client_coords:
+                log_debug("[错误] 无法获取游戏客户区，已取消截图")
+                return None
+            left, top, width, height = client_coords
+            if width <= 0 or height <= 0:
+                return None
+            # 副屏可以位于主屏左侧或上方，坐标可能为负。
+            screenshot = ImageGrab.grab(
+                bbox=(left, top, left + width, top + height), all_screens=True)
+            if screenshot.size != (width, height):
+                log_debug(f"[错误] 游戏截图尺寸异常: {screenshot.size}，预期 {(width, height)}")
+                return None
 
             return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
         except Exception as e:
@@ -261,7 +273,7 @@ class RepositoryFilter:
 
         return roi
 
-    def capture_line_rois(self) -> list:
+    def capture_line_rois(self, with_screen: bool = False) -> list:
         """
         截取6行单行ROI区域（用于单行OCR识别）
         优化：只截图一次，然后从同一张图裁剪6个区域
@@ -271,7 +283,8 @@ class RepositoryFilter:
         """
         window_image = self._capture_game_window()
         if window_image is None:
-            return [np.zeros((100, 100, 3), dtype=np.uint8) for _ in self.LINE_ROI_COORDS]
+            empty = [np.zeros((100, 100, 3), dtype=np.uint8) for _ in self.LINE_ROI_COORDS]
+            return (empty, None) if with_screen else empty
 
         line_images = []
         for y_start, y_end in self.LINE_ROI_COORDS:
@@ -279,7 +292,9 @@ class RepositoryFilter:
             x1, y1, x2, y2 = self._scale_region(region)
             line_images.append(window_image[y1:y2, x1:x2])
 
-        return line_images
+        # ===== OCR 自动采集调试代码：返回与六行 ROI 同一次拍摄的完整截图 =====
+        return (line_images, window_image) if with_screen else line_images
+        # ===== OCR 自动采集调试代码结束 =====
 
     def _save_debug_image(self, image: np.ndarray, name: str):
         """保存调试图像"""

@@ -1,5 +1,5 @@
 """
-NRrelic Bot v2.0.0 - 主程序入口
+NRrelic Bot v2 - 主程序入口
  - 异步初始化 OCR (使用 QThread)
 """
 

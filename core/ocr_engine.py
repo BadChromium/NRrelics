@@ -315,7 +315,8 @@ def correct_entries(entries: list, corrector: EntryCorrector) -> list:
     return corrected_entries
 
 
-def correct_entries_with_info(entries: list, corrector: EntryCorrector, original_text: str = None) -> list:
+def correct_entries_with_info(entries: list, corrector: EntryCorrector, original_text: str = None,
+                              trace: dict = None) -> list:
     """
     对词条列表进行纠错，支持动态断行合并，返回详细信息
 
@@ -349,6 +350,21 @@ def correct_entries_with_info(entries: list, corrector: EntryCorrector, original
             i += 1
         return text[i:]
 
+    # ===== OCR 自动采集调试代码：记录实际纠错调用及动态阈值；删除时移除此局部函数和下方两处调用 =====
+    def correct_with_trace(text):
+        corrected, similarity, accepted = corrector.correct_entry(text)
+        if trace is not None:
+            trace.setdefault("correction_calls", []).append({
+                "retry": trace.get("current_retry", 1),
+                "input_text": text,
+                "candidate_text": corrected,
+                "similarity": float(similarity),
+                "required_threshold": corrector._get_dynamic_threshold(text),
+                "accepted_by_corrector": bool(accepted),
+            })
+        return corrected, similarity, accepted
+    # ===== OCR 自动采集调试代码结束 =====
+
     for i, entry in enumerate(entries):
         # 如果这一行已经被合并过，跳过它
         if i in merged_indices:
@@ -359,7 +375,7 @@ def correct_entries_with_info(entries: list, corrector: EntryCorrector, original
             continue
 
         # 获取当前行的相似度信息
-        corrected_text, similarity, is_corrected = corrector.correct_entry(entry)
+        corrected_text, similarity, is_corrected = correct_with_trace(entry)
 
         # 检查是否需要尝试合并：当前行未被纠正、存在下一行、且该行未曾尝试过合并
         should_try_merge = (
@@ -379,7 +395,7 @@ def correct_entries_with_info(entries: list, corrector: EntryCorrector, original
                 merged_candidate = entry + cleaned_next
 
                 # 计算合并后的相似度
-                merged_text, merged_similarity, merged_is_corrected = corrector.correct_entry(merged_candidate)
+                merged_text, merged_similarity, merged_is_corrected = correct_with_trace(merged_candidate)
 
                 # 决策：仅当合并后相似度更高时才合并
                 if merged_similarity > similarity:
@@ -395,6 +411,15 @@ def correct_entries_with_info(entries: list, corrector: EntryCorrector, original
                     if DEBUG_ENABLED and original_text:
                         result_item["raw_text"] = original_text  # 保存真正的原始OCR文本
                     result.append(result_item)
+                    # ===== OCR 自动采集调试代码：保留合并输出与原始词条的对应关系 =====
+                    if trace is not None:
+                        trace.setdefault("correction_sources", []).append({
+                            "entry_numbers": [i + 1, i + 2],
+                            "raw_text": entry + " | " + next_entry,
+                            "merged": True,
+                            "merge_accepted_by_corrector": bool(merged_is_corrected),
+                        })
+                    # ===== OCR 自动采集调试代码结束 =====
                     skip_next = True
                     merge_attempted.add(i)  # 标记该行已尝试合并
                     merged_indices.add(i + 1)  # 标记下一行已被合并，不再单独处理
@@ -418,6 +443,12 @@ def correct_entries_with_info(entries: list, corrector: EntryCorrector, original
         if DEBUG_ENABLED and original_text:
             result_item["raw_text"] = original_text  # 保存真正的原始OCR文本
         result.append(result_item)
+        # ===== OCR 自动采集调试代码：保留单行输出与原始词条的对应关系 =====
+        if trace is not None:
+            trace.setdefault("correction_sources", []).append({
+                "entry_numbers": [i + 1], "raw_text": entry, "merged": False,
+            })
+        # ===== OCR 自动采集调试代码结束 =====
 
     return result
 
@@ -639,7 +670,7 @@ class OCREngine:
             log_debug(f"[错误] 单行OCR识别失败: {e}")
             return "", 0.0
 
-    def recognize_with_classification(self, image: np.ndarray, mode: str = "normal") -> dict:
+    def recognize_with_classification(self, image: np.ndarray, mode: str = "normal", trace: dict = None) -> dict:
         """
         执行OCR识别并分类词条（正面/负面）
         支持重试机制：如果识别不到任何词条库内的词条，最多重试3次
@@ -703,16 +734,28 @@ class OCREngine:
 
                 # 先进行断行合并和纠错，获取详细信息
                 corrected_info = []
+                # ===== OCR 自动采集调试代码：标识每次重试对应的纠错调用 =====
+                if trace is not None:
+                    trace["current_retry"] = retry + 1
+                    trace["correction_sources"] = []
+                # ===== OCR 自动采集调试代码结束 =====
                 if self.corrector and CORRECTION_CONFIG["enabled"]:
                     corrected_info = correct_entries_with_info(raw_entries, self.corrector, text if DEBUG_ENABLED else None)
                 else:
                     # 如果没有纠错器，直接使用原始词条
-                    for entry in raw_entries:
+                    for entry_number, entry in enumerate(raw_entries, 1):
                         corrected_info.append({
                             "text": entry,
                             "similarity": 0.0,
                             "is_corrected": False
                         })
+                        # ===== OCR 自动采集调试代码 =====
+                        if trace is not None:
+                            trace["correction_sources"].append({
+                                "entry_numbers": [entry_number],
+                                "raw_text": entry, "merged": False,
+                            })
+                        # ===== OCR 自动采集调试代码结束 =====
 
                 # 然后对纠错后的词条进行分类
                 affixes = []
@@ -779,7 +822,8 @@ class OCREngine:
             "success": False
         }
 
-    def recognize_with_classification_from_lines(self, line_images: list, mode: str = "normal") -> dict:
+    def recognize_with_classification_from_lines(self, line_images: list, mode: str = "normal",
+                                                 trace: dict = None) -> dict:
         """
         从6行图像执行OCR识别并分类词条（正面/负面）
         支持重试机制：如果识别不到任何词条库内的词条，最多重试3次
@@ -801,12 +845,22 @@ class OCREngine:
         for retry in range(max_retry):
             start_time = time.time()
 
+            # ===== OCR 自动采集调试代码：仅在传入 trace 时记录本次尝试 =====
+            attempt = {"retry": retry + 1, "lines": []} if trace is not None else None
+            if trace is not None:
+                trace.setdefault("attempts", []).append(attempt)
+            # ===== OCR 自动采集调试代码结束 =====
+
             try:
                 # 对每行进行单行识别
                 all_text = []
                 line_ocr_start = time.time()
                 for line_image in line_images:
-                    text, _ = self.recognize_single_line(line_image)
+                    text, score = self.recognize_single_line(line_image)
+                    # ===== OCR 自动采集调试代码 =====
+                    if attempt is not None:
+                        attempt["lines"].append({"text": text, "score": float(score)})
+                    # ===== OCR 自动采集调试代码结束 =====
                     if text:
                         all_text.append(text)
                 line_ocr_time = (time.time() - line_ocr_start) * 1000
@@ -831,6 +885,12 @@ class OCREngine:
                 # 处理文本（符号标准化、分割词条）
                 split_start = time.time()
                 raw_entries = split_entries(combined_text)
+                # ===== OCR 自动采集调试代码 =====
+                if trace is not None:
+                    trace["raw_joined"] = combined_text
+                    trace["normalized_joined"] = postprocess_text(combined_text)
+                    trace["split_entries"] = list(raw_entries)
+                # ===== OCR 自动采集调试代码结束 =====
                 if mode == "deepnight":
                     raw_entries = [
                         part
@@ -842,13 +902,20 @@ class OCREngine:
                         )
                         for part in entry
                     ]
+                # ===== OCR 自动采集调试代码 =====
+                if trace is not None:
+                    trace["entries_after_separator_repair"] = list(raw_entries)
+                # ===== OCR 自动采集调试代码结束 =====
                 split_time = (time.time() - split_start) * 1000
 
                 # 先进行断行合并和纠错，获取详细信息
                 correction_start = time.time()
                 corrected_info = []
                 if self.corrector and CORRECTION_CONFIG["enabled"]:
-                    corrected_info = correct_entries_with_info(raw_entries, self.corrector, original_combined_text if DEBUG_ENABLED else None)
+                    corrected_info = correct_entries_with_info(
+                        raw_entries, self.corrector,
+                        original_combined_text if DEBUG_ENABLED else None,
+                        trace=trace)
                 else:
                     # 如果没有纠错器，直接使用原始词条
                     for entry in raw_entries:
@@ -858,6 +925,10 @@ class OCREngine:
                             "is_corrected": False
                         })
                 correction_time = (time.time() - correction_start) * 1000
+                # ===== OCR 自动采集调试代码 =====
+                if trace is not None:
+                    trace["correction_trace"] = [dict(info) for info in corrected_info]
+                # ===== OCR 自动采集调试代码结束 =====
 
                 # 然后对纠错后的词条进行分类
                 affixes = []
@@ -903,6 +974,8 @@ class OCREngine:
                 }
 
             except Exception as e:
+                if attempt is not None:
+                    attempt["error"] = str(e)
                 if retry < max_retry - 1:
                     log_debug(f"[重试 {retry + 1}/{max_retry}] OCR识别失败: {e}，重试中...")
                     time.sleep(0.3)
