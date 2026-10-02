@@ -17,6 +17,8 @@ _static_data = [
     ('data/deepnight_pos.txt', 'data'),
     ('data/deepnight_neg.txt', 'data'),
     ('data/affix_catalog.json', 'data'),
+    ('data/affix_parameters/AttachEffectParam.csv', 'data/affix_parameters'),
+    ('data/affix_parameters/LICENSE', 'data/affix_parameters'),
     ('data/icon_cup.png', 'data'),
     ('data/icon_bookmark.png', 'data'),
     ('data/relic_validation/EquipParamAntique.csv', 'data/relic_validation'),
