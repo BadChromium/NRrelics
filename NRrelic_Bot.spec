@@ -19,6 +19,12 @@ _static_data = [
     ('data/affix_catalog.json', 'data'),
     ('data/icon_cup.png', 'data'),
     ('data/icon_bookmark.png', 'data'),
+    ('data/relic_validation/EquipParamAntique.csv', 'data/relic_validation'),
+    ('data/relic_validation/AttachEffectParam.csv', 'data/relic_validation'),
+    ('data/relic_validation/AttachEffectTableParam.csv', 'data/relic_validation'),
+    ('data/relic_validation/LICENSE-MIT.txt', 'data/relic_validation'),
+    ('data/relic_validation/AttachEffectName.fmg.xml', 'data/relic_validation'),
+    ('data/relic_validation/AttachEffectName_dlc01.fmg.xml', 'data/relic_validation'),
 ]
 datas = list(_static_data)
 

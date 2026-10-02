@@ -78,6 +78,7 @@
 
 通用预设回退、保守停止行为及兼容性说明见 [匹配与安全说明](docs/relic-matching.md)。
 分组必须词条的编辑步骤和可选元数据限制见 [分组说明](docs/grouped-requirements.md)。
+只读存档规则验证的覆盖范围和限制见 [只读验证说明](docs/relic-validation.md)。
 
 ## 技术特性
 
