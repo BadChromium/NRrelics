@@ -161,11 +161,22 @@ class SavePage(QWidget):
         self.validate_current_btn = PushButton("验证当前存档")
         self.validate_current_btn.clicked.connect(self._validate_current_save)
         controls.addWidget(self.validate_current_btn)
-        self.validate_file_btn = PushButton("选择存档副本")
+        self.validate_file_btn = PushButton("选择存档")
         self.validate_file_btn.clicked.connect(self._choose_validation_file)
         controls.addWidget(self.validate_file_btn)
         controls.addStretch()
         card_layout.addLayout(controls)
+
+        players = QHBoxLayout()
+        players.addWidget(QLabel("选择角色："))
+        self.validation_player_combo = ComboBox()
+        self.validation_player_combo.addItem("全部角色", userData=None)
+        self.validation_player_combo.setEnabled(False)
+        self.validation_player_combo.currentIndexChanged.connect(self._render_validation_report)
+        players.addWidget(self.validation_player_combo)
+        players.addStretch()
+        card_layout.addLayout(players)
+        self._validation_report = None
 
         self.validation_status_label = QLabel("尚未验证")
         self.validation_status_label.setWordWrap(True)
@@ -191,7 +202,7 @@ class SavePage(QWidget):
 
     def _choose_validation_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择只读验证用存档副本", "", "Nightreign save (*.sl2);;All files (*)")
+            self, "选择存档", "", "Nightreign save (*.sl2 *.co2);;All files (*)")
         if path:
             self._start_validation(path)
 
@@ -199,10 +210,12 @@ class SavePage(QWidget):
         if getattr(self, "_validation_thread", None) is not None:
             return
         if not os.path.isfile(path):
-            self.validation_status_label.setText("无法验证：文件不存在。")
+            self._on_validation_finished(ValidationReport(
+                ValidationStatus.UNKNOWN, reasons=("无法验证：文件不存在。",), source=path))
             return
         self.validate_current_btn.setEnabled(False)
         self.validate_file_btn.setEnabled(False)
+        self.validation_player_combo.setEnabled(False)
         self.validation_status_label.setText("正在只读验证，不会写入或修改存档……")
         # App ownership keeps a worker alive even if this page is destroyed.
         self._validation_thread = QThread(QApplication.instance())
@@ -228,10 +241,38 @@ class SavePage(QWidget):
     def _validation_done(self):
         self.validate_current_btn.setEnabled(True)
         self.validate_file_btn.setEnabled(True)
+        self.validation_player_combo.setEnabled(self.validation_player_combo.count() > 1)
         self._validation_thread = None
         self._validation_worker = None
 
     def _on_validation_finished(self, report: ValidationReport):
+        self._validation_report = report
+        self.validation_player_combo.blockSignals(True)
+        self.validation_player_combo.clear()
+        self.validation_player_combo.addItem("全部角色", userData=None)
+        players = {}
+        for item in report.results:
+            players.setdefault(item.relic.slot, item.relic.player_name or "未命名角色")
+        for slot, name in players.items():
+            self.validation_player_combo.addItem(name, userData=slot)
+        self.validation_player_combo.setCurrentIndex(0)
+        self.validation_player_combo.blockSignals(False)
+        self.validation_player_combo.setEnabled(len(players) > 0)
+        self._render_validation_report()
+
+    def _render_validation_report(self, *_):
+        report = self._validation_report
+        if report is None:
+            return
+        slot = self.validation_player_combo.currentData()
+        if slot is not None:
+            results = tuple(item for item in report.results if item.relic.slot == slot)
+            statuses = {item.status for item in results}
+            status = (ValidationStatus.UNKNOWN if report.reasons
+                      else ValidationStatus.VIOLATES if ValidationStatus.VIOLATES in statuses
+                      else ValidationStatus.UNKNOWN if ValidationStatus.UNKNOWN in statuses or not results
+                      else ValidationStatus.CONFORMS)
+            report = ValidationReport(status, results, report.reasons, report.source)
         labels = {
             ValidationStatus.CONFORMS: "符合已知规则（不代表官方有效性或无封禁风险）",
             ValidationStatus.VIOLATES: "违反明确的已知规则",
